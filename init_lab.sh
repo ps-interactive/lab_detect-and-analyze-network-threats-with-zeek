@@ -38,13 +38,15 @@ echo "Current directory: $(pwd)"
 # Check for PCAP files
 echo
 echo "Checking for PCAP files..."
-if ls *.pcap 1> /dev/null 2>&1; then
-    echo "✓ PCAP files found:"
+PCAP_COUNT=$(ls *.pcap 2>/dev/null | wc -l)
+
+if [ $PCAP_COUNT -eq 3 ]; then
+    echo "✓ All PCAP files found:"
     ls -lh *.pcap
 else
-    echo "✗ No PCAP files found. Creating sample files..."
+    echo "✗ Missing PCAP files. Creating all three..."
     
-    # Create sample PCAP files with tcpdump
+    # Generate suspicious_traffic.pcap
     echo "Generating suspicious_traffic.pcap..."
     sudo timeout 10 tcpdump -i lo -w suspicious_traffic.pcap 2>/dev/null &
     TCPDUMP_PID=$!
@@ -61,21 +63,41 @@ else
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
     
-    # Copy to create other files
-    if [ -f suspicious_traffic.pcap ]; then
-        cp suspicious_traffic.pcap normal_traffic.pcap
-        cp suspicious_traffic.pcap sample_malware_conn.pcap
-        echo "✓ Created PCAP files"
-    else
-        # Create minimal valid PCAP files
-        for pcap in suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap; do
+    # Generate normal_traffic.pcap
+    echo "Generating normal_traffic.pcap..."
+    sudo timeout 5 tcpdump -i lo -w normal_traffic.pcap 2>/dev/null &
+    TCPDUMP_PID=$!
+    sleep 1
+    ping -c 5 127.0.0.1 > /dev/null 2>&1
+    sleep 1
+    sudo kill $TCPDUMP_PID 2>/dev/null
+    wait $TCPDUMP_PID 2>/dev/null
+    
+    # Generate sample_malware_conn.pcap
+    echo "Generating sample_malware_conn.pcap..."
+    sudo timeout 5 tcpdump -i lo -w sample_malware_conn.pcap 2>/dev/null &
+    TCPDUMP_PID=$!
+    sleep 1
+    for i in {1..5}; do
+        echo "beacon" | nc -w1 127.0.0.1 4444 2>/dev/null || true
+    done
+    sleep 1
+    sudo kill $TCPDUMP_PID 2>/dev/null
+    wait $TCPDUMP_PID 2>/dev/null
+    
+    # Verify all files exist, if not create minimal valid PCAP
+    for pcap in suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap; do
+        if [ ! -f $pcap ]; then
+            echo "Creating minimal $pcap..."
             echo -ne '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > $pcap
-        done
-        echo "✓ Created minimal PCAP files"
-    fi
+        fi
+    done
     
     # Set ownership
     sudo chown ubuntu:ubuntu *.pcap
+    
+    echo "✓ Created PCAP files:"
+    ls -lh *.pcap
 fi
 
 # Check for Zeek
