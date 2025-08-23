@@ -4,9 +4,16 @@ Generate sample network traffic PCAP files for Zeek analysis lab
 Creates both suspicious and normal traffic patterns
 """
 
-from scapy.all import *
+import sys
 import random
-import time
+
+try:
+    from scapy.all import *
+except ImportError:
+    print("Scapy not installed. Installing...")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "scapy"])
+    from scapy.all import *
 
 def generate_suspicious_traffic():
     """Generate suspicious network traffic patterns"""
