@@ -227,20 +227,69 @@ else
     ZEEK_CMD="echo 'Zeek not installed'"
 fi
 
-# Check for zeek-cut
+# Check for zeek-cut and create if missing
 echo
 echo "Checking for zeek-cut..."
-if command -v zeek-cut &> /dev/null; then
-    echo "✓ zeek-cut is available"
-else
-    echo "✗ zeek-cut not found. Creating alternative..."
-    cat << 'ZEEKCUT' > ~/zeek-cut
-#!/bin/bash
-awk -F'\t' '/^#fields/{for(i=2;i<=NF;i++)f[$i]=i-1}/^#/{next}{for(i=1;i<ARGC;i++)if(ARGV[i] in f){printf "%s",$f[ARGV[i]];if(i<ARGC-1)printf "\t"}printf "\n"}' "$@"
+if ! command -v zeek-cut &> /dev/null; then
+    echo "✗ zeek-cut not found. Creating proper implementation..."
+    
+    # Create a working zeek-cut script
+    cat << 'ZEEKCUT' | sudo tee /usr/local/bin/zeek-cut > /dev/null
+#!/usr/bin/env python3
+import sys
+import argparse
+
+def main():
+    # Read field names from command line
+    fields = sys.argv[1:]
+    
+    if not fields:
+        # If no fields specified, pass through everything
+        for line in sys.stdin:
+            print(line.rstrip())
+        return
+    
+    # Read the log file from stdin
+    header_fields = []
+    field_indices = []
+    
+    for line in sys.stdin:
+        line = line.rstrip()
+        
+        if line.startswith('#separator'):
+            continue
+        elif line.startswith('#fields'):
+            # Parse the field names
+            parts = line.split('\t')
+            header_fields = parts[1:]  # Skip the "#fields" part
+            
+            # Find indices for requested fields
+            for field in fields:
+                if field in header_fields:
+                    field_indices.append(header_fields.index(field))
+                else:
+                    field_indices.append(-1)
+        elif line.startswith('#'):
+            continue
+        else:
+            # Process data lines
+            parts = line.split('\t')
+            output = []
+            for idx in field_indices:
+                if idx >= 0 and idx < len(parts):
+                    output.append(parts[idx])
+                else:
+                    output.append('-')
+            print('\t'.join(output))
+
+if __name__ == '__main__':
+    main()
 ZEEKCUT
-    chmod +x ~/zeek-cut
-    export PATH=$PATH:~
-    echo "✓ Created zeek-cut alternative"
+    
+    sudo chmod +x /usr/local/bin/zeek-cut
+    echo "✓ Created zeek-cut at /usr/local/bin/zeek-cut"
+else
+    echo "✓ zeek-cut is available"
 fi
 
 # Copy Zeek scripts
