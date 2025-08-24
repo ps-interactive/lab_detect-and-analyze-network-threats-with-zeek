@@ -1,86 +1,64 @@
-##! Detect port scanning activity
-##! This script identifies potential port scans based on connection patterns
+##! Detect port and host scanning activities
 
-@load base/frameworks/notice
-
-module PortScan;
+module DetectScans;
 
 export {
     redef enum Notice::Type += {
-        ## Port scan detected
         Port_Scan,
-        ## Vertical scan detected (multiple ports, single host)
-        Vertical_Scan,
-        ## Horizontal scan detected (single port, multiple hosts)  
-        Horizontal_Scan
+        Host_Scan
     };
     
-    ## Threshold for number of ports before alerting
-    const scan_threshold = 5 &redef;
+    # Thresholds for detection
+    const port_scan_threshold = 10 &redef;
+    const host_scan_threshold = 5 &redef;
+    const scan_interval = 5min &redef;
     
-    ## Time window for scan detection (in seconds)
-    const scan_window = 60.0 &redef;
-    
-    ## Track scanning activity
-    global scanner_activity: table[addr] of set[port] &create_expire=scan_window;
-    global horizontal_scanners: table[addr] of set[addr] &create_expire=scan_window;
+    # Track scanning attempts
+    global scan_attempts: table[addr] of set[port] &create_expire = scan_interval;
+    global host_attempts: table[addr] of set[addr] &create_expire = scan_interval;
 }
 
 event connection_attempt(c: connection)
 {
-    local src = c$id$orig_h;
-    local dst = c$id$resp_h;
-    local dport = c$id$resp_p;
+    local orig = c$id$orig_h;
+    local resp = c$id$resp_h;
+    local resp_p = c$id$resp_p;
     
-    # Track vertical scanning (many ports on same host)
-    if ( src !in scanner_activity )
-        scanner_activity[src] = set();
+    # Track port scanning
+    if ( orig !in scan_attempts )
+        scan_attempts[orig] = set();
     
-    add scanner_activity[src][dport];
+    add scan_attempts[orig][resp_p];
     
-    if ( |scanner_activity[src]| >= scan_threshold )
+    if ( |scan_attempts[orig]| >= port_scan_threshold )
     {
-        NOTICE([$note=Vertical_Scan,
-                $msg=fmt("%s is scanning multiple ports on %s", src, dst),
-                $src=src,
-                $identifier=cat(src)]);
+        NOTICE([$note=Port_Scan,
+                $msg=fmt("Vertical port scan detected from %s", orig),
+                $src=orig,
+                $identifier=cat(orig)]);
     }
+    
+    # Track host scanning
+    if ( orig !in host_attempts )
+        host_attempts[orig] = set();
+    
+    add host_attempts[orig][resp];
+    
+    if ( |host_attempts[orig]| >= host_scan_threshold )
+    {
+        NOTICE([$note=Host_Scan,
+                $msg=fmt("Horizontal host scan detected from %s", orig),
+                $src=orig,
+                $identifier=cat(orig)]);
+    }
+}
+
+event connection_established(c: connection)
+{
+    event connection_attempt(c);
 }
 
 event connection_rejected(c: connection)
 {
-    local src = c$id$orig_h;
-    local dst = c$id$resp_h;
-    
-    # Track horizontal scanning (same port on many hosts)
-    if ( src !in horizontal_scanners )
-        horizontal_scanners[src] = set();
-    
-    add horizontal_scanners[src][dst];
-    
-    if ( |horizontal_scanners[src]| >= scan_threshold )
-    {
-        NOTICE([$note=Horizontal_Scan,
-                $msg=fmt("%s is scanning multiple hosts", src),
-                $src=src,
-                $identifier=cat(src)]);
-    }
-}
-
-event connection_state_remove(c: connection)
-{
-    # Detect SYN scans (connections that never complete)
-    if ( c$conn$history == "S" || c$conn$history == "Sr" )
-    {
-        local src = c$id$orig_h;
-        
-        if ( src in scanner_activity && |scanner_activity[src]| >= 3 )
-        {
-            NOTICE([$note=Port_Scan,
-                    $msg=fmt("Potential SYN scan from %s", src),
-                    $src=src,
-                    $conn=c,
-                    $identifier=cat(src)]);
-        }
-    }
+    event connection_attempt(c);
 }
