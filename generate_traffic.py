@@ -1,242 +1,287 @@
 #!/usr/bin/env python3
-"""
-Generate sample network traffic PCAP files for Zeek analysis lab
-Creates both suspicious and normal traffic patterns with real packet data
-"""
 
-import sys
+import os
+import time
+import struct
 import random
+from datetime import datetime
 
-# Try to import scapy, install if needed
-try:
-    from scapy.all import *
-except ImportError:
-    print("Installing scapy...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "scapy"])
-    from scapy.all import *
+# Generate network traffic patterns for analysis
+def create_pcap_header():
+    """Create PCAP file header"""
+    magic_number = 0xa1b2c3d4
+    version_major = 2
+    version_minor = 4
+    thiszone = 0
+    sigfigs = 0
+    snaplen = 65535
+    network = 1  # Ethernet
+    
+    return struct.pack('IHHiIII', magic_number, version_major, version_minor,
+                      thiszone, sigfigs, snaplen, network)
+
+def create_packet_header(length, timestamp):
+    """Create PCAP packet header"""
+    ts_sec = int(timestamp)
+    ts_usec = int((timestamp - ts_sec) * 1000000)
+    incl_len = length
+    orig_len = length
+    
+    return struct.pack('IIII', ts_sec, ts_usec, incl_len, orig_len)
+
+def create_tcp_syn_packet(src_ip, dst_ip, src_port, dst_port):
+    """Create a TCP SYN packet"""
+    # Ethernet header (14 bytes)
+    eth_dst = b'\x00\x0c\x29\x00\x00\x01'
+    eth_src = b'\x00\x0c\x29\x00\x00\x02'
+    eth_type = b'\x08\x00'  # IPv4
+    ethernet = eth_dst + eth_src + eth_type
+    
+    # IP header (20 bytes)
+    version_ihl = b'\x45'
+    tos = b'\x00'
+    total_len = struct.pack('!H', 40)  # IP header + TCP header
+    ip_id = struct.pack('!H', random.randint(1, 65535))
+    flags_frag = b'\x40\x00'
+    ttl = b'\x40'
+    protocol = b'\x06'  # TCP
+    checksum = b'\x00\x00'
+    src_ip_bytes = struct.pack('!4B', *[int(x) for x in src_ip.split('.')])
+    dst_ip_bytes = struct.pack('!4B', *[int(x) for x in dst_ip.split('.')])
+    
+    ip_header = version_ihl + tos + total_len + ip_id + flags_frag + \
+                ttl + protocol + checksum + src_ip_bytes + dst_ip_bytes
+    
+    # TCP header (20 bytes)
+    src_port_bytes = struct.pack('!H', src_port)
+    dst_port_bytes = struct.pack('!H', dst_port)
+    seq_num = struct.pack('!I', random.randint(0, 4294967295))
+    ack_num = b'\x00\x00\x00\x00'
+    data_offset = b'\x50'  # 5 * 4 = 20 bytes
+    flags = b'\x02'  # SYN
+    window = struct.pack('!H', 8192)
+    tcp_checksum = b'\x00\x00'
+    urgent = b'\x00\x00'
+    
+    tcp_header = src_port_bytes + dst_port_bytes + seq_num + ack_num + \
+                 data_offset + flags + window + tcp_checksum + urgent
+    
+    return ethernet + ip_header + tcp_header
+
+def create_http_request_packet(src_ip, dst_ip, uri, host=None):
+    """Create an HTTP GET request packet"""
+    # Build HTTP payload
+    if "sql" in uri.lower() or "select" in uri.lower():
+        # SQL injection attempt
+        http_data = f"GET {uri} HTTP/1.1\r\n"
+    elif ".." in uri:
+        # Directory traversal attempt
+        http_data = f"GET {uri} HTTP/1.1\r\n"
+    else:
+        http_data = f"GET {uri} HTTP/1.1\r\n"
+    
+    if host:
+        http_data += f"Host: {host}\r\n"
+    http_data += "User-Agent: Mozilla/5.0\r\n\r\n"
+    
+    # Ethernet header
+    eth_dst = b'\x00\x0c\x29\x00\x00\x01'
+    eth_src = b'\x00\x0c\x29\x00\x00\x02'
+    eth_type = b'\x08\x00'
+    ethernet = eth_dst + eth_src + eth_type
+    
+    # IP header
+    version_ihl = b'\x45'
+    tos = b'\x00'
+    total_len = struct.pack('!H', 20 + 20 + len(http_data))
+    ip_id = struct.pack('!H', random.randint(1, 65535))
+    flags_frag = b'\x40\x00'
+    ttl = b'\x40'
+    protocol = b'\x06'
+    checksum = b'\x00\x00'
+    src_ip_bytes = struct.pack('!4B', *[int(x) for x in src_ip.split('.')])
+    dst_ip_bytes = struct.pack('!4B', *[int(x) for x in dst_ip.split('.')])
+    
+    ip_header = version_ihl + tos + total_len + ip_id + flags_frag + \
+                ttl + protocol + checksum + src_ip_bytes + dst_ip_bytes
+    
+    # TCP header with PSH+ACK flags
+    src_port_bytes = struct.pack('!H', random.randint(1024, 65535))
+    dst_port_bytes = struct.pack('!H', 80)
+    seq_num = struct.pack('!I', random.randint(0, 4294967295))
+    ack_num = struct.pack('!I', random.randint(0, 4294967295))
+    data_offset = b'\x50'
+    flags = b'\x18'  # PSH+ACK
+    window = struct.pack('!H', 8192)
+    tcp_checksum = b'\x00\x00'
+    urgent = b'\x00\x00'
+    
+    tcp_header = src_port_bytes + dst_port_bytes + seq_num + ack_num + \
+                 data_offset + flags + window + tcp_checksum + urgent
+    
+    return ethernet + ip_header + tcp_header + http_data.encode()
+
+def create_dns_query_packet(src_ip, dst_ip, domain):
+    """Create a DNS query packet"""
+    # Ethernet header
+    eth_dst = b'\x00\x0c\x29\x00\x00\x01'
+    eth_src = b'\x00\x0c\x29\x00\x00\x02'
+    eth_type = b'\x08\x00'
+    ethernet = eth_dst + eth_src + eth_type
+    
+    # IP header
+    version_ihl = b'\x45'
+    tos = b'\x00'
+    
+    # DNS payload
+    dns_id = struct.pack('!H', random.randint(1, 65535))
+    dns_flags = b'\x01\x00'  # Standard query
+    dns_qdcount = b'\x00\x01'  # 1 question
+    dns_ancount = b'\x00\x00'
+    dns_nscount = b'\x00\x00'
+    dns_arcount = b'\x00\x00'
+    
+    # Encode domain name
+    dns_question = b''
+    for part in domain.split('.'):
+        dns_question += bytes([len(part)]) + part.encode()
+    dns_question += b'\x00'
+    dns_question += b'\x00\x01'  # Type A
+    dns_question += b'\x00\x01'  # Class IN
+    
+    dns_data = dns_id + dns_flags + dns_qdcount + dns_ancount + \
+               dns_nscount + dns_arcount + dns_question
+    
+    total_len = struct.pack('!H', 20 + 8 + len(dns_data))  # IP + UDP + DNS
+    ip_id = struct.pack('!H', random.randint(1, 65535))
+    flags_frag = b'\x40\x00'
+    ttl = b'\x40'
+    protocol = b'\x11'  # UDP
+    checksum = b'\x00\x00'
+    src_ip_bytes = struct.pack('!4B', *[int(x) for x in src_ip.split('.')])
+    dst_ip_bytes = struct.pack('!4B', *[int(x) for x in dst_ip.split('.')])
+    
+    ip_header = version_ihl + tos + total_len + ip_id + flags_frag + \
+                ttl + protocol + checksum + src_ip_bytes + dst_ip_bytes
+    
+    # UDP header
+    src_port = struct.pack('!H', random.randint(1024, 65535))
+    dst_port = struct.pack('!H', 53)
+    udp_len = struct.pack('!H', 8 + len(dns_data))
+    udp_checksum = b'\x00\x00'
+    
+    udp_header = src_port + dst_port + udp_len + udp_checksum
+    
+    return ethernet + ip_header + udp_header + dns_data
 
 def generate_suspicious_traffic():
-    """Generate suspicious network traffic patterns with real data"""
-    packets = []
-    
+    """Generate suspicious traffic PCAP"""
     print("Generating suspicious traffic patterns...")
     
-    # 1. Port scan pattern - TCP SYN scan
-    print("  - Port scanning pattern")
-    src_ip = "192.168.1.100"
-    dst_ip = "192.168.1.10"
-    
-    for port in [21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389, 8080]:
-        # SYN packet
-        syn = IP(src=src_ip, dst=dst_ip)/TCP(sport=random.randint(1024,65535), dport=port, flags="S", seq=1000)
-        packets.append(syn)
+    with open('suspicious_traffic.pcap', 'wb') as f:
+        f.write(create_pcap_header())
         
-        if port in [22, 80, 443]:  # Some ports respond
-            # SYN-ACK response
-            syn_ack = IP(src=dst_ip, dst=src_ip)/TCP(sport=port, dport=syn[TCP].sport, flags="SA", seq=2000, ack=1001)
-            packets.append(syn_ack)
-            # ACK
-            ack = IP(src=src_ip, dst=dst_ip)/TCP(sport=syn[TCP].sport, dport=port, flags="A", seq=1001, ack=2001)
-            packets.append(ack)
-            # RST to close
-            rst = IP(src=src_ip, dst=dst_ip)/TCP(sport=syn[TCP].sport, dport=port, flags="R", seq=1001)
-            packets.append(rst)
-    
-    # 2. SSH Brute Force
-    print("  - SSH brute force attempts")
-    attacker_ip = "203.0.113.50"
-    target_ip = "192.168.1.15"
-    
-    for attempt in range(10):
-        sport = random.randint(40000, 50000)
-        # Connection attempt
-        syn = IP(src=attacker_ip, dst=target_ip)/TCP(sport=sport, dport=22, flags="S", seq=attempt*1000)
-        packets.append(syn)
-        syn_ack = IP(src=target_ip, dst=attacker_ip)/TCP(sport=22, dport=sport, flags="SA", seq=5000+attempt, ack=attempt*1000+1)
-        packets.append(syn_ack)
-        ack = IP(src=attacker_ip, dst=target_ip)/TCP(sport=sport, dport=22, flags="A", seq=attempt*1000+1, ack=5001+attempt)
-        packets.append(ack)
+        timestamp = time.time()
         
-        # SSH data exchange (failed auth)
-        ssh_data = IP(src=attacker_ip, dst=target_ip)/TCP(sport=sport, dport=22, flags="PA", seq=attempt*1000+1, ack=5001+attempt)/Raw(load="SSH-2.0-OpenSSH\r\n")
-        packets.append(ssh_data)
+        # Port scanning pattern from 192.168.1.100
+        scanner_ip = "192.168.1.100"
+        target_ip = "192.168.1.10"
         
-        # Connection reset
-        rst = IP(src=target_ip, dst=attacker_ip)/TCP(sport=22, dport=sport, flags="R", seq=5001+attempt)
-        packets.append(rst)
-    
-    # 3. HTTP with attacks
-    print("  - HTTP attack patterns")
-    
-    # SQL injection attempt
-    sql_payload = "GET /login.php?user=admin' OR '1'='1&password=x HTTP/1.1\r\nHost: vulnerable.local\r\nUser-Agent: sqlmap/1.0\r\n\r\n"
-    sqli = IP(src="192.168.1.110", dst="192.168.1.30")/TCP(sport=54321, dport=80, flags="PA", seq=10000, ack=20000)/Raw(load=sql_payload)
-    packets.append(sqli)
-    
-    # HTTP response
-    response = IP(src="192.168.1.30", dst="192.168.1.110")/TCP(sport=80, dport=54321, flags="PA", seq=20000, ack=10000+len(sql_payload))/Raw(load="HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n<html>Login successful</html>")
-    packets.append(response)
-    
-    # Directory traversal
-    traversal_payload = "GET /../../../../etc/passwd HTTP/1.1\r\nHost: target.local\r\n\r\n"
-    traversal = IP(src="192.168.1.111", dst="192.168.1.30")/TCP(sport=54322, dport=80, flags="PA", seq=30000, ack=40000)/Raw(load=traversal_payload)
-    packets.append(traversal)
-    
-    # 4. DNS queries (including suspicious)
-    print("  - DNS tunneling patterns")
-    
-    # Normal DNS
-    dns_query = IP(src="192.168.1.50", dst="8.8.8.8")/UDP(sport=53001, dport=53)/DNS(qd=DNSQR(qname="google.com", qtype="A"))
-    packets.append(dns_query)
-    
-    # DNS response
-    dns_response = IP(src="8.8.8.8", dst="192.168.1.50")/UDP(sport=53, dport=53001)/DNS(qr=1, qd=DNSQR(qname="google.com"), an=DNSRR(rrname="google.com", rdata="142.250.80.46"))
-    packets.append(dns_response)
-    
-    # Suspicious long DNS query (tunneling)
-    long_domain = "data" + "x" * 50 + ".tunnel.evil.com"
-    dns_tunnel = IP(src="192.168.1.102", dst="8.8.8.8")/UDP(sport=53002, dport=53)/DNS(qd=DNSQR(qname=long_domain))
-    packets.append(dns_tunnel)
-    
-    # 5. C2 beacon traffic
-    print("  - C2 beacon traffic")
-    c2_ip = "185.159.158.1"
-    infected = "192.168.1.105"
-    
-    for i in range(5):
-        sport = random.randint(50000, 60000)
-        # Beacon out
-        beacon_data = f"BEACON:{i:04d}:ACTIVE:SYSINFO"
-        beacon = IP(src=infected, dst=c2_ip)/TCP(sport=sport, dport=8443, flags="PA", seq=i*1000, ack=i*2000)/Raw(load=beacon_data)
-        packets.append(beacon)
+        for port in [21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389, 8080]:
+            packet = create_tcp_syn_packet(scanner_ip, target_ip, 
+                                          random.randint(1024, 65535), port)
+            f.write(create_packet_header(len(packet), timestamp))
+            f.write(packet)
+            timestamp += 0.1
         
-        # C2 response
-        command = f"CMD:SLEEP:60"
-        response = IP(src=c2_ip, dst=infected)/TCP(sport=8443, dport=sport, flags="PA", seq=i*2000, ack=i*1000+len(beacon_data))/Raw(load=command)
-        packets.append(response)
-    
-    # Write PCAP
-    wrpcap("/home/ubuntu/zeek_analysis/suspicious_traffic.pcap", packets)
-    print(f"Generated suspicious_traffic.pcap with {len(packets)} packets")
+        # SSH brute force attempts from 203.0.113.50
+        attacker_ip = "203.0.113.50"
+        for _ in range(20):
+            packet = create_tcp_syn_packet(attacker_ip, target_ip,
+                                          random.randint(1024, 65535), 22)
+            f.write(create_packet_header(len(packet), timestamp))
+            f.write(packet)
+            timestamp += 0.5
+        
+        # SQL injection attempts
+        packet = create_http_request_packet("192.168.1.105", target_ip,
+                                           "/login.php?user=admin' OR '1'='1", "test.com")
+        f.write(create_packet_header(len(packet), timestamp))
+        f.write(packet)
+        timestamp += 1
+        
+        # Directory traversal attempts
+        packet = create_http_request_packet("192.168.1.106", target_ip,
+                                           "/../../../../etc/passwd", "test.com")
+        f.write(create_packet_header(len(packet), timestamp))
+        f.write(packet)
+        timestamp += 1
+        
+        # DNS tunneling attempt (long domain)
+        long_domain = "data" + "x" * 60 + ".evil.com"
+        packet = create_dns_query_packet("192.168.1.107", "8.8.8.8", long_domain)
+        f.write(create_packet_header(len(packet), timestamp))
+        f.write(packet)
+        timestamp += 1
+        
+        # Protocol mismatch - HTTP on port 443
+        packet = create_http_request_packet("192.168.1.108", target_ip,
+                                           "/", None)  # Missing host header
+        f.write(create_packet_header(len(packet), timestamp))
+        f.write(packet)
 
 def generate_normal_traffic():
-    """Generate normal network traffic patterns"""
-    packets = []
-    
+    """Generate normal traffic PCAP"""
     print("Generating normal traffic patterns...")
     
-    # Normal HTTP traffic
-    print("  - Normal HTTP traffic")
-    for i in range(5):
-        src_ip = f"192.168.1.{50+i}"
+    with open('normal_traffic.pcap', 'wb') as f:
+        f.write(create_pcap_header())
         
-        # HTTP GET request
-        http_get = f"GET /index.html HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: Mozilla/5.0 Firefox/91.0\r\nAccept: text/html\r\n\r\n"
-        request = IP(src=src_ip, dst="192.168.1.80")/TCP(sport=random.randint(50000,60000), dport=80, flags="PA", seq=1000*i, ack=2000*i)/Raw(load=http_get)
-        packets.append(request)
+        timestamp = time.time()
         
-        # HTTP response
-        http_resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 100\r\n\r\n<html><body>Welcome to Example.com</body></html>"
-        response = IP(src="192.168.1.80", dst=src_ip)/TCP(sport=80, dport=request[TCP].sport, flags="PA", seq=2000*i, ack=1000*i+len(http_get))/Raw(load=http_resp)
-        packets.append(response)
-    
-    # Normal DNS queries
-    print("  - Normal DNS queries")
-    domains = ["google.com", "github.com", "stackoverflow.com", "microsoft.com", "amazon.com"]
-    for domain in domains:
-        src_ip = "192.168.1.71"
-        # Query
-        dns_q = IP(src=src_ip, dst="192.168.1.1")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=domain))
-        packets.append(dns_q)
+        # Normal HTTP requests
+        for _ in range(5):
+            packet = create_http_request_packet("192.168.1.20", "192.168.1.10",
+                                               "/index.html", "example.com")
+            f.write(create_packet_header(len(packet), timestamp))
+            f.write(packet)
+            timestamp += random.uniform(1, 5)
         
-        # Response
-        dns_r = IP(src="192.168.1.1", dst=src_ip)/UDP(sport=53, dport=dns_q[UDP].sport)/DNS(qr=1, qd=DNSQR(qname=domain), an=DNSRR(rrname=domain, rdata="93.184.216.34"))
-        packets.append(dns_r)
-    
-    # Normal HTTPS (TLS handshake)
-    print("  - HTTPS connections")
-    for i in range(3):
-        src_ip = f"192.168.1.{61+i}"
-        sport = random.randint(50000, 60000)
-        
-        # TCP handshake
-        syn = IP(src=src_ip, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="S", seq=1000)
-        packets.append(syn)
-        syn_ack = IP(src="192.168.1.443", dst=src_ip)/TCP(sport=443, dport=sport, flags="SA", seq=2000, ack=1001)
-        packets.append(syn_ack)
-        ack = IP(src=src_ip, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="A", seq=1001, ack=2001)
-        packets.append(ack)
-        
-        # TLS Client Hello (simplified)
-        tls_hello = b"\x16\x03\x01\x00\x50" + b"\x01" + b"\x00" * 79  # Simplified TLS
-        tls_pkt = IP(src=src_ip, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="PA", seq=1001, ack=2001)/Raw(load=tls_hello)
-        packets.append(tls_pkt)
-    
-    # Write PCAP
-    wrpcap("/home/ubuntu/zeek_analysis/normal_traffic.pcap", packets)
-    print(f"Generated normal_traffic.pcap with {len(packets)} packets")
+        # Normal DNS queries
+        for domain in ["google.com", "microsoft.com", "github.com"]:
+            packet = create_dns_query_packet("192.168.1.21", "8.8.8.8", domain)
+            f.write(create_packet_header(len(packet), timestamp))
+            f.write(packet)
+            timestamp += random.uniform(1, 3)
 
-def generate_malware_traffic():
-    """Generate malware beacon traffic"""
-    packets = []
+def generate_malware_beacon():
+    """Generate C2 beacon traffic PCAP"""
+    print("Generating malware beacon patterns...")
     
-    print("Generating malware beacon traffic...")
-    
-    c2_server = "45.142.120.5"
-    infected_host = "192.168.1.150"
-    
-    # Initial connection
-    sport = 55555
-    syn = IP(src=infected_host, dst=c2_server)/TCP(sport=sport, dport=4444, flags="S", seq=1000)
-    packets.append(syn)
-    syn_ack = IP(src=c2_server, dst=infected_host)/TCP(sport=4444, dport=sport, flags="SA", seq=2000, ack=1001)
-    packets.append(syn_ack)
-    ack = IP(src=infected_host, dst=c2_server)/TCP(sport=sport, dport=4444, flags="A", seq=1001, ack=2001)
-    packets.append(ack)
-    
-    # Regular beacons
-    for i in range(10):
-        # Beacon with system info
-        beacon_data = f"BEACON:{i:04d}:HOST:WINBOX:USER:admin:STATUS:ACTIVE"
-        beacon = IP(src=infected_host, dst=c2_server)/TCP(sport=sport, dport=4444, flags="PA", seq=1001+i*100, ack=2001+i*50)/Raw(load=beacon_data)
-        packets.append(beacon)
+    with open('sample_malware_conn.pcap', 'wb') as f:
+        f.write(create_pcap_header())
         
-        # C2 command
-        if i % 3 == 0:
-            cmd = "CMD:SCREENSHOT" if i == 3 else "CMD:KEYLOG:START" if i == 6 else "CMD:PERSIST"
-            response = IP(src=c2_server, dst=infected_host)/TCP(sport=4444, dport=sport, flags="PA", seq=2001+i*50, ack=1001+i*100+len(beacon_data))/Raw(load=cmd)
-            packets.append(response)
-    
-    # Write PCAP
-    wrpcap("/home/ubuntu/zeek_analysis/sample_malware_conn.pcap", packets)
-    print(f"Generated sample_malware_conn.pcap with {len(packets)} packets")
+        timestamp = time.time()
+        malware_ip = "192.168.1.150"
+        c2_server = "10.0.0.100"
+        
+        # Regular beacon pattern - every 60 seconds
+        for i in range(10):
+            packet = create_tcp_syn_packet(malware_ip, c2_server,
+                                          random.randint(1024, 65535), 4444)
+            f.write(create_packet_header(len(packet), timestamp))
+            f.write(packet)
+            
+            # Add some data transfer
+            data_packet = create_http_request_packet(malware_ip, c2_server,
+                                                    f"/beacon?id={i}", "c2.evil.com")
+            f.write(create_packet_header(len(data_packet), timestamp + 0.1))
+            f.write(data_packet)
+            
+            timestamp += 60  # Regular 60-second interval
 
 if __name__ == "__main__":
-    print("Starting PCAP generation for Zeek analysis lab...")
-    try:
-        generate_suspicious_traffic()
-        generate_normal_traffic()
-        generate_malware_traffic()
-        print("\nPCAP generation complete!")
-        print("\nTesting with Zeek...")
-        
-        # Test the generated file
-        import subprocess
-        result = subprocess.run(["zeek", "-C", "-r", "/home/ubuntu/zeek_analysis/suspicious_traffic.pcap"], 
-                              capture_output=True, text=True, cwd="/home/ubuntu/zeek_analysis")
-        
-        if result.returncode == 0:
-            # Check if conn.log has content
-            try:
-                with open("/home/ubuntu/zeek_analysis/conn.log", "r") as f:
-                    lines = len([l for l in f if not l.startswith("#")])
-                    print(f"✓ Zeek successfully processed PCAP - conn.log has {lines} connections")
-            except:
-                print("✗ conn.log not found or empty")
-        else:
-            print("✗ Zeek processing failed")
-            
-    except Exception as e:
-        print(f"Error: {e}")
-        print("You may need to install scapy: pip3 install --user scapy")
+    generate_suspicious_traffic()
+    generate_normal_traffic()
+    generate_malware_beacon()
+    print("Traffic generation complete!")
