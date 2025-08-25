@@ -1,97 +1,85 @@
-##! Detect protocol anomalies and mismatches
+##! Protocol anomaly detection script for Zeek
+##! Detects protocol mismatches and missing required headers
 
 module ProtocolAnomaly;
 
 export {
     redef enum Notice::Type += {
         Protocol_Mismatch,
-        Missing_HTTP_Header,
-        SQL_Injection_Attempt,
-        Directory_Traversal_Attempt,
-        DNS_Tunneling_Suspected
+        Missing_Protocol_Headers,
+        Suspicious_User_Agent,
+        Long_DNS_Query
     };
+    
+    # DNS query length threshold
+    const dns_length_threshold = 50 &redef;
 }
 
-# Detect HTTP on non-HTTP ports
-event http_request(c: connection, method: string, original_URI: string, unescaped_URI: string, version: string)
-    {
-    if ( c$id$resp_p == 443/tcp )
-        {
+# Check for HTTP on wrong ports
+event http_request(c: connection, method: string, original_URI: string,
+                   unescaped_URI: string, version: string) {
+    local resp_port = c$id$resp_p;
+    
+    # Check for plain HTTP on HTTPS port
+    if (resp_port == 443/tcp && c$conn$conn_state != "SF") {
         NOTICE([$note=Protocol_Mismatch,
-                $msg=fmt("Plain HTTP traffic on HTTPS port 443 from %s", c$id$orig_h),
+                $msg=fmt("Plain HTTP detected on HTTPS port 443 from %s", c$id$orig_h),
                 $conn=c,
-                $identifier=cat(c$id$orig_h, c$id$resp_h, c$id$resp_p)]);
-        }
+                $identifier=cat(c$id$orig_h, c$id$resp_h, resp_port)]);
+    }
     
     # Check for missing Host header in HTTP/1.1
-    if ( version == "1.1" && ! c?$http$host )
-        {
-        NOTICE([$note=Missing_HTTP_Header,
+    if (version == "1.1" && !c$http?$host) {
+        NOTICE([$note=Missing_Protocol_Headers,
                 $msg=fmt("HTTP/1.1 request missing Host header from %s", c$id$orig_h),
                 $conn=c,
-                $identifier=cat(c$id$orig_h, c$id$resp_h)]);
-        }
-    
-    # Detect SQL injection attempts
-    if ( /(\bselect\b|\bunion\b|\bor\b.*=|'.*or.*'.*=.*')/i in unescaped_URI )
-        {
-        NOTICE([$note=SQL_Injection_Attempt,
-                $msg=fmt("Potential SQL injection attempt from %s: %s", c$id$orig_h, unescaped_URI),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, unescaped_URI)]);
-        }
-    
-    # Detect directory traversal attempts
-    if ( /\.\.\/|\.\.\\/ in unescaped_URI )
-        {
-        NOTICE([$note=Directory_Traversal_Attempt,
-                $msg=fmt("Directory traversal attempt from %s: %s", c$id$orig_h, unescaped_URI),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, unescaped_URI)]);
-        }
+                $identifier=cat(c$id$orig_h, "missing_host")]);
     }
+    
+    # Check for missing or suspicious User-Agent
+    if (!c$http?$user_agent) {
+        NOTICE([$note=Missing_Protocol_Headers,
+                $msg=fmt("HTTP request missing User-Agent header from %s", c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, "missing_ua")]);
+    } else if (c$http$user_agent == "-" || 
+               c$http$user_agent == "" ||
+               /^(curl|wget|python|ruby|perl)/i in c$http$user_agent) {
+        NOTICE([$note=Suspicious_User_Agent,
+                $msg=fmt("Suspicious User-Agent detected: %s from %s", 
+                        c$http$user_agent, c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, c$http$user_agent)]);
+    }
+}
 
-# Detect DNS tunneling through unusually long queries
-event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count)
-    {
-    if ( |query| > 50 )
-        {
-        NOTICE([$note=DNS_Tunneling_Suspected,
-                $msg=fmt("Suspiciously long DNS query from %s: %s (%d chars)", c$id$orig_h, query, |query|),
+# Check for suspicious DNS queries
+event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count) {
+    # Check for unusually long DNS queries (potential DNS tunneling)
+    if (|query| > dns_length_threshold) {
+        NOTICE([$note=Long_DNS_Query,
+                $msg=fmt("Unusually long DNS query (%d chars): %s from %s", 
+                        |query|, query, c$id$orig_h),
                 $conn=c,
                 $identifier=cat(c$id$orig_h, query)]);
-        }
     }
+    
+    # Check for suspicious patterns in DNS queries
+    if (/^[0-9a-f]{32,}/ in query ||  # Long hex strings
+        /\.(tk|ml|ga|cf)$/ in query) { # Suspicious TLDs
+        NOTICE([$note=Long_DNS_Query,
+                $msg=fmt("Suspicious DNS query pattern: %s from %s", query, c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, query)]);
+    }
+}
 
-# Check for missing User-Agent in HTTP requests
-event http_header(c: connection, is_orig: bool, name: string, value: string)
-    {
-    if ( is_orig && name == "USER-AGENT" )
-        {
-        # Mark that we've seen a User-Agent
-        if ( ! c?$http )
-            return;
-        # This is handled internally by Zeek
-        }
+# Detect weird protocol behaviors
+event weird(name: string, msg: string, addl: string) {
+    # Alert on specific weird behaviors that indicate attacks
+    if (name == "truncated_header" || 
+        name == "above_hole_data_without_any_acks" ||
+        name == "bad_HTTP_request") {
+        print fmt("Protocol anomaly detected: %s - %s", name, msg);
     }
-
-event http_all_headers(c: connection, is_orig: bool, hlist: mime_header_list)
-    {
-    if ( is_orig && c?$http )
-        {
-        local has_ua = F;
-        for ( i in hlist )
-            {
-            if ( hlist[i]$name == "USER-AGENT" )
-                has_ua = T;
-            }
-        
-        if ( ! has_ua )
-            {
-            NOTICE([$note=Missing_HTTP_Header,
-                    $msg=fmt("HTTP request missing User-Agent header from %s", c$id$orig_h),
-                    $conn=c,
-                    $identifier=cat(c$id$orig_h, c$id$resp_h, "no-ua")]);
-            }
-        }
-    }
+}
