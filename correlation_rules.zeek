@@ -1,57 +1,42 @@
-##! Correlation rules for detecting multi-stage attacks
-##! Correlates multiple events to identify complex attack patterns
+##! Correlation rules for detecting attacks
+
+@load base/frameworks/notice
 
 module CorrelationRules;
 
 export {
     redef enum Notice::Type += {
         SSH_Brute_Force,
-        Multi_Stage_Attack,
-        C2_Beacon_Pattern
+        C2_Beacon
     };
     
-    # Thresholds
-    const ssh_attempt_threshold = 5 &redef;
-    const beacon_count_threshold = 3 &redef;
+    const ssh_threshold = 10 &redef;
 }
 
 # Track SSH attempts
-global ssh_attempts: table[addr, addr] of count &create_expire=10min &default=0;
-
-# Track connection patterns for beacon detection  
-global beacon_connections: table[addr, addr, port] of count &create_expire=30min &default=0;
+global ssh_attempts: table[addr] of count &default=0;
 
 event connection_state_remove(c: connection) {
-    # Detect SSH brute force (multiple connections to port 22)
-    if (c$id$resp_p == 22/tcp) {
-        local ssh_key = [c$id$orig_h, c$id$resp_h];
-        ++ssh_attempts[ssh_key];
+    local orig = c$id$orig_h;
+    local resp_port = c$id$resp_p;
+    
+    # Track SSH connections
+    if (resp_port == 22/tcp) {
+        ssh_attempts[orig] += 1;
         
-        if (ssh_attempts[ssh_key] >= ssh_attempt_threshold) {
+        if (ssh_attempts[orig] == ssh_threshold) {
             NOTICE([$note=SSH_Brute_Force,
-                    $msg=fmt("SSH brute force detected: %s -> %s (%d attempts)", 
-                            c$id$orig_h, c$id$resp_h, ssh_attempts[ssh_key]),
-                    $conn=c,
-                    $identifier=cat(c$id$orig_h, c$id$resp_h, "ssh_brute")]);
-            delete ssh_attempts[ssh_key];
+                    $msg=fmt("SSH brute force detected from %s (%d attempts)", orig, ssh_attempts[orig]),
+                    $src=orig,
+                    $identifier=cat(orig, "ssh")]);
         }
     }
     
-    # Track potential C2 beacons (repeated connections to same port)
-    local beacon_key = [c$id$orig_h, c$id$resp_h, c$id$resp_p];
-    ++beacon_connections[beacon_key];
-    
-    if (beacon_connections[beacon_key] >= beacon_count_threshold) {
-        # Check if it's on a suspicious port
-        if (c$id$resp_p == 4444/tcp || c$id$resp_p == 8443/tcp || 
-            c$id$resp_p == 1337/tcp || c$id$resp_p == 31337/tcp) {
-            NOTICE([$note=C2_Beacon_Pattern,
-                    $msg=fmt("Potential C2 beacon: %s -> %s:%s (%d connections)",
-                            c$id$orig_h, c$id$resp_h, c$id$resp_p, 
-                            beacon_connections[beacon_key]),
-                    $conn=c,
-                    $identifier=cat(c$id$orig_h, c$id$resp_h, c$id$resp_p, "beacon")]);
-            beacon_connections[beacon_key] = 0;
-        }
+    # Simple C2 beacon detection (port 4444)
+    if (resp_port == 4444/tcp) {
+        NOTICE([$note=C2_Beacon,
+                $msg=fmt("Potential C2 communication from %s to port 4444", orig),
+                $src=orig,
+                $identifier=cat(orig, "c2")]);
     }
 }
