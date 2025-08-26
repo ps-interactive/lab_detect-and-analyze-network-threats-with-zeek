@@ -54,153 +54,229 @@ if [ $VALID_PCAPS -eq 3 ]; then
 else
     echo "✗ Missing PCAP files. Creating traffic captures..."
     
-    # Use Python to create PCAP files with scapy
+    # Use Python to create PCAP files without scapy dependency
     echo "Generating network traffic data..."
     python3 << 'EOF'
-import sys
-try:
-    from scapy.all import *
-except ImportError:
-    print("Installing required packages...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "scapy"])
-    from scapy.all import *
-
+import struct
+import time
 import random
 
-def create_suspicious_traffic():
-    packets = []
+def write_pcap_header(f):
+    """Write PCAP global header"""
+    f.write(struct.pack('<IHHIIII', 
+        0xa1b2c3d4,  # Magic number
+        2, 4,        # Version 2.4
+        0,           # Timezone offset
+        0,           # Timestamp accuracy
+        65535,       # Snaplen
+        1            # Ethernet
+    ))
+
+def create_packet(src_ip, dst_ip, src_port, dst_port, tcp_flags='S', payload=b''):
+    """Create a simple TCP packet"""
+    # Ethernet header (14 bytes)
+    eth = b'\x00\x00\x00\x00\x00\x00' + b'\x00\x00\x00\x00\x00\x00' + b'\x08\x00'
     
-    # Port scanning activity
+    # IP header (20 bytes)
+    ip_header = b'\x45\x00'  # Version 4, IHL 5
+    ip_total_len = 20 + 20 + len(payload)  # IP + TCP + payload
+    ip_header += struct.pack('>H', ip_total_len)
+    ip_header += b'\x00\x00\x40\x00\x40\x06\x00\x00'  # ID, flags, TTL, protocol TCP
+    
+    # Convert IPs
+    src_bytes = bytes(map(int, src_ip.split('.')))
+    dst_bytes = bytes(map(int, dst_ip.split('.')))
+    ip_header += src_bytes + dst_bytes
+    
+    # TCP header (20 bytes)
+    tcp = struct.pack('>HH', src_port, dst_port)  # Ports
+    tcp += struct.pack('>I', random.randint(1000, 100000))  # Seq
+    tcp += struct.pack('>I', 0)  # Ack
+    tcp += b'\x50'  # Header length
+    
+    # Flags
+    flags = 0
+    if 'S' in tcp_flags: flags |= 0x02
+    if 'A' in tcp_flags: flags |= 0x10
+    if 'P' in tcp_flags: flags |= 0x08
+    if 'F' in tcp_flags: flags |= 0x01
+    if 'R' in tcp_flags: flags |= 0x04
+    tcp += bytes([flags])
+    
+    tcp += b'\x20\x00'  # Window
+    tcp += b'\x00\x00'  # Checksum
+    tcp += b'\x00\x00'  # Urgent
+    
+    return eth + ip_header + tcp + payload
+
+def write_packet(f, packet, timestamp=None):
+    """Write packet with PCAP packet header"""
+    if timestamp is None:
+        timestamp = time.time()
+    
+    ts_sec = int(timestamp)
+    ts_usec = int((timestamp - ts_sec) * 1000000)
+    
+    # PCAP packet header
+    f.write(struct.pack('<IIII',
+        ts_sec, ts_usec,
+        len(packet),
+        len(packet)
+    ))
+    f.write(packet)
+
+# Create suspicious_traffic.pcap
+with open('suspicious_traffic.pcap', 'wb') as f:
+    write_pcap_header(f)
+    
+    # Port scanning from 192.168.1.100
     print("  Creating port scan traffic...")
-    src = "192.168.1.100"
-    for port in [21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389, 8080]:
-        syn = IP(src=src, dst="192.168.1.10")/TCP(sport=random.randint(40000,60000), dport=port, flags="S", seq=1000)
-        packets.append(syn)
+    scanner_ip = "192.168.1.100"
+    target_ip = "10.0.0.5"
+    ports = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 1433, 3306, 3389, 8080, 8443]
+    
+    for port in ports:
+        # SYN scan
+        pkt = create_packet(scanner_ip, target_ip, random.randint(40000, 60000), port, 'S')
+        write_packet(f, pkt)
+        
+        # Some ports respond
         if port in [22, 80, 443]:
-            syn_ack = IP(src="192.168.1.10", dst=src)/TCP(sport=port, dport=syn[TCP].sport, flags="SA", seq=2000, ack=1001)
-            packets.append(syn_ack)
-            rst = IP(src=src, dst="192.168.1.10")/TCP(sport=syn[TCP].sport, dport=port, flags="R", seq=1001)
-            packets.append(rst)
+            # SYN-ACK
+            pkt = create_packet(target_ip, scanner_ip, port, 40000, 'SA')
+            write_packet(f, pkt)
+            # RST
+            pkt = create_packet(scanner_ip, target_ip, 40000, port, 'R')
+            write_packet(f, pkt)
+        else:
+            # RST (port closed)
+            pkt = create_packet(target_ip, scanner_ip, port, 40000, 'R')
+            write_packet(f, pkt)
     
-    # SSH brute force attempts
-    print("  Creating SSH authentication failures...")
-    attacker = "203.0.113.50"
+    # SSH brute force from 203.0.113.50
+    print("  Creating SSH brute force attempts...")
     for i in range(20):
-        sport = random.randint(50000, 60000)
-        syn = IP(src=attacker, dst="192.168.1.15")/TCP(sport=sport, dport=22, flags="S", seq=i*1000)
-        packets.append(syn)
-        syn_ack = IP(src="192.168.1.15", dst=attacker)/TCP(sport=22, dport=sport, flags="SA", seq=i*2000, ack=i*1000+1)
-        packets.append(syn_ack)
-        ack = IP(src=attacker, dst="192.168.1.15")/TCP(sport=sport, dport=22, flags="A", seq=i*1000+1, ack=i*2000+1)
-        packets.append(ack)
-        rst = IP(src="192.168.1.15", dst=attacker)/TCP(sport=22, dport=sport, flags="R", seq=i*2000+1)
-        packets.append(rst)
+        sport = 50000 + i
+        pkt = create_packet("203.0.113.50", "10.0.0.10", sport, 22, 'S')
+        write_packet(f, pkt)
+        pkt = create_packet("10.0.0.10", "203.0.113.50", 22, sport, 'SA')
+        write_packet(f, pkt)
+        pkt = create_packet("203.0.113.50", "10.0.0.10", sport, 22, 'A')
+        write_packet(f, pkt)
+        # Connection closed quickly (auth failure)
+        pkt = create_packet("10.0.0.10", "203.0.113.50", 22, sport, 'FA')
+        write_packet(f, pkt)
+        pkt = create_packet("203.0.113.50", "10.0.0.10", sport, 22, 'A')
+        write_packet(f, pkt)
     
-    # HTTP traffic with SQL injection
+    # HTTP with SQL injection
     print("  Creating HTTP attack patterns...")
-    payload = "GET /login.php?user=admin' OR '1'='1&pass=x HTTP/1.1\r\nHost: vulnerable.local\r\n\r\n"
-    http_attack = IP(src="192.168.1.110", dst="192.168.1.30")/TCP(sport=54321, dport=80, flags="PA", seq=10000, ack=20000)/Raw(load=payload)
-    packets.append(http_attack)
+    payload = b"GET /login.php?user=admin' OR '1'='1 HTTP/1.1\r\nHost: vulnerable.com\r\n\r\n"
+    pkt = create_packet("192.168.1.150", "10.0.0.80", 54321, 80, 'PA', payload)
+    write_packet(f, pkt)
     
     # Directory traversal
-    traversal = "GET /../../../../etc/passwd HTTP/1.1\r\nHost: target.local\r\n\r\n"
-    dir_attack = IP(src="192.168.1.111", dst="192.168.1.30")/TCP(sport=54322, dport=80, flags="PA", seq=30000, ack=40000)/Raw(load=traversal)
-    packets.append(dir_attack)
+    payload = b"GET /../../../../etc/passwd HTTP/1.1\r\nHost: vulnerable.com\r\n\r\n"
+    pkt = create_packet("192.168.1.150", "10.0.0.80", 54322, 80, 'PA', payload)
+    write_packet(f, pkt)
     
-    # DNS tunneling patterns
-    print("  Creating DNS tunneling traffic...")
+    # DNS queries (UDP would need different handling, using TCP for simplicity)
+    print("  Creating DNS tunneling patterns...")
     for i in range(5):
-        long_query = "data" + "x" * 40 + str(i) + ".tunnel.evil.com"
-        dns = IP(src="192.168.1.102", dst="8.8.8.8")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=long_query))
-        packets.append(dns)
+        # Long DNS-like payload
+        dns_data = b"QUERY:" + b"x" * 50 + str(i).encode()
+        pkt = create_packet("192.168.1.200", "8.8.8.8", 60000+i, 53, 'PA', dns_data)
+        write_packet(f, pkt)
     
-    # C2 beacon traffic
-    print("  Creating command and control beacons...")
-    c2_server = "185.159.158.1"
-    for i in range(10):
-        beacon_data = f"BEACON:{i:04d}:ACTIVE:SYSINFO:HOST"
-        beacon = IP(src="192.168.1.105", dst=c2_server)/TCP(sport=55555, dport=8443, flags="PA", seq=i*1000, ack=i*2000)/Raw(load=beacon_data)
-        packets.append(beacon)
-    
-    wrpcap("suspicious_traffic.pcap", packets)
-    print(f"  Created suspicious_traffic.pcap ({len(packets)} packets)")
+    # Normal mixed traffic
+    print("  Adding normal traffic...")
+    for i in range(5):
+        client = f"192.168.1.{100+i}"
+        pkt = create_packet(client, "10.0.0.80", 45000+i, 80, 'S')
+        write_packet(f, pkt)
+        pkt = create_packet("10.0.0.80", client, 80, 45000+i, 'SA')
+        write_packet(f, pkt)
+        pkt = create_packet(client, "10.0.0.80", 45000+i, 80, 'A')
+        write_packet(f, pkt)
 
-def create_normal_traffic():
-    packets = []
+print("  Created suspicious_traffic.pcap")
+
+# Create normal_traffic.pcap
+with open('normal_traffic.pcap', 'wb') as f:
+    write_pcap_header(f)
     
-    # Normal HTTP traffic
-    print("  Creating normal HTTP traffic...")
+    print("  Creating normal web traffic...")
     for i in range(10):
-        src = f"192.168.1.{50+i}"
-        request = f"GET /index.html HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
-        http = IP(src=src, dst="192.168.1.80")/TCP(sport=random.randint(50000,60000), dport=80, flags="PA", seq=i*1000, ack=i*2000)/Raw(load=request)
-        packets.append(http)
-        response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>Welcome</body></html>"
-        resp = IP(src="192.168.1.80", dst=src)/TCP(sport=80, dport=http[TCP].sport, flags="PA", seq=i*2000, ack=i*1000+len(request))/Raw(load=response)
-        packets.append(resp)
-    
-    # Normal DNS queries
-    print("  Creating normal DNS queries...")
-    for domain in ["google.com", "github.com", "stackoverflow.com", "microsoft.com"]:
-        dns_q = IP(src="192.168.1.71", dst="192.168.1.1")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=domain))
-        packets.append(dns_q)
-        dns_r = IP(src="192.168.1.1", dst="192.168.1.71")/UDP(sport=53, dport=dns_q[UDP].sport)/DNS(qr=1, qd=DNSQR(qname=domain), an=DNSRR(rrname=domain, rdata="93.184.216.34"))
-        packets.append(dns_r)
+        client = f"192.168.1.{100+i}"
+        sport = 50000 + i
+        
+        # HTTP connection
+        pkt = create_packet(client, "93.184.216.34", sport, 80, 'S')
+        write_packet(f, pkt)
+        pkt = create_packet("93.184.216.34", client, 80, sport, 'SA')
+        write_packet(f, pkt)
+        pkt = create_packet(client, "93.184.216.34", sport, 80, 'A')
+        write_packet(f, pkt)
+        
+        # HTTP request
+        request = b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+        pkt = create_packet(client, "93.184.216.34", sport, 80, 'PA', request)
+        write_packet(f, pkt)
+        
+        # Close
+        pkt = create_packet(client, "93.184.216.34", sport, 80, 'FA')
+        write_packet(f, pkt)
+        pkt = create_packet("93.184.216.34", client, 80, sport, 'FA')
+        write_packet(f, pkt)
     
     # HTTPS connections
-    print("  Creating HTTPS connections...")
     for i in range(5):
-        src = f"192.168.1.{61+i}"
-        sport = random.randint(50000, 60000)
-        syn = IP(src=src, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="S", seq=1000)
-        packets.append(syn)
-        syn_ack = IP(src="192.168.1.443", dst=src)/TCP(sport=443, dport=sport, flags="SA", seq=2000, ack=1001)
-        packets.append(syn_ack)
-        ack = IP(src=src, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="A", seq=1001, ack=2001)
-        packets.append(ack)
-    
-    wrpcap("normal_traffic.pcap", packets)
-    print(f"  Created normal_traffic.pcap ({len(packets)} packets)")
+        client = f"192.168.1.{110+i}"
+        sport = 55000 + i
+        pkt = create_packet(client, "142.250.80.46", sport, 443, 'S')
+        write_packet(f, pkt)
+        pkt = create_packet("142.250.80.46", client, 443, sport, 'SA')
+        write_packet(f, pkt)
+        pkt = create_packet(client, "142.250.80.46", sport, 443, 'A')
+        write_packet(f, pkt)
 
-def create_malware_traffic():
-    packets = []
+print("  Created normal_traffic.pcap")
+
+# Create sample_malware_conn.pcap
+with open('sample_malware_conn.pcap', 'wb') as f:
+    write_pcap_header(f)
     
-    # Malware C2 beacons
-    print("  Creating malware beacon traffic...")
-    c2 = "45.142.120.5"
-    infected = "192.168.1.150"
-    sport = 55555
+    print("  Creating C2 beacon traffic...")
+    c2_ip = "185.220.101.45"
+    infected_ip = "192.168.1.55"
     
-    # Initial handshake
-    syn = IP(src=infected, dst=c2)/TCP(sport=sport, dport=4444, flags="S", seq=1000)
-    packets.append(syn)
-    syn_ack = IP(src=c2, dst=infected)/TCP(sport=4444, dport=sport, flags="SA", seq=2000, ack=1001)
-    packets.append(syn_ack)
-    ack = IP(src=infected, dst=c2)/TCP(sport=sport, dport=4444, flags="A", seq=1001, ack=2001)
-    packets.append(ack)
-    
-    # Regular beacons
+    # Regular beacons at intervals
+    base_time = time.time()
     for i in range(10):
-        beacon = f"BEACON:{i:04d}:HOST:WINBOX:USER:admin:STATUS:ACTIVE"
-        pkt = IP(src=infected, dst=c2)/TCP(sport=sport, dport=4444, flags="PA", seq=1001+i*100, ack=2001+i*50)/Raw(load=beacon)
-        packets.append(pkt)
-        if i % 3 == 0:
-            cmd = "CMD:SCREENSHOT" if i == 3 else "CMD:PERSIST"
-            resp = IP(src=c2, dst=infected)/TCP(sport=4444, dport=sport, flags="PA", seq=2001+i*50, ack=1001+i*100+len(beacon))/Raw(load=cmd)
-            packets.append(resp)
-    
-    wrpcap("sample_malware_conn.pcap", packets)
-    print(f"  Created sample_malware_conn.pcap ({len(packets)} packets)")
+        timestamp = base_time + (i * 60)  # 60 second intervals
+        sport = 40000 + i
+        
+        # Beacon connection
+        pkt = create_packet(infected_ip, c2_ip, sport, 4444, 'S')
+        write_packet(f, pkt, timestamp)
+        
+        pkt = create_packet(c2_ip, infected_ip, 4444, sport, 'SA')
+        write_packet(f, pkt, timestamp + 0.1)
+        
+        pkt = create_packet(infected_ip, c2_ip, sport, 4444, 'A')
+        write_packet(f, pkt, timestamp + 0.2)
+        
+        # Beacon data
+        beacon = f"BEACON:{i:04d}:STATUS:ACTIVE".encode()
+        pkt = create_packet(infected_ip, c2_ip, sport, 4444, 'PA', beacon)
+        write_packet(f, pkt, timestamp + 0.3)
+        
+        # Close
+        pkt = create_packet(infected_ip, c2_ip, sport, 4444, 'FA')
+        write_packet(f, pkt, timestamp + 0.5)
 
-# Create all PCAP files
-try:
-    create_suspicious_traffic()
-    create_normal_traffic()
-    create_malware_traffic()
-    print("  Successfully created all PCAP files")
-except Exception as e:
-    print(f"  Error: {e}")
+print("  Created sample_malware_conn.pcap")
+print("  Successfully created all PCAP files")
 EOF
     
     # Set ownership
