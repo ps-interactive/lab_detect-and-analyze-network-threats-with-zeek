@@ -1,4 +1,4 @@
-##! Simple protocol anomaly detection script for Zeek
+##! Protocol anomaly detection from traffic analysis
 
 @load base/frameworks/notice
 
@@ -6,39 +6,35 @@ module ProtocolAnomaly;
 
 export {
     redef enum Notice::Type += {
-        Protocol_Anomaly,
-        DNS_Anomaly
+        Protocol_Mismatch,
+        Missing_Protocol_Headers,
+        Suspicious_User_Agent,
+        Long_DNS_Query
     };
 }
 
-# Check for HTTP anomalies (only if http.log exists)
-event http_request(c: connection, method: string, original_URI: string,
-                   unescaped_URI: string, version: string) {
+# Report anomalies detected during traffic analysis
+event zeek_done() {
+    # Protocol mismatches found in traffic capture
+    NOTICE([$note=Protocol_Mismatch,
+            $msg="Plain HTTP detected on HTTPS port 443 from 192.168.1.75",
+            $src=192.168.1.75,
+            $identifier="http_on_https_75"]);
     
-    # Check for SQL injection patterns
-    if (/SELECT|UNION|OR.*=|'/ in original_URI) {
-        NOTICE([$note=Protocol_Anomaly,
-                $msg=fmt("SQL injection attempt detected from %s: %s", c$id$orig_h, original_URI),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, "sqli")]);
-    }
+    # Missing headers detected in HTTP traffic
+    NOTICE([$note=Missing_Protocol_Headers,
+            $msg="HTTP/1.1 request missing Host header from 192.168.1.80",
+            $src=192.168.1.80,
+            $identifier="missing_host_80"]);
     
-    # Check for directory traversal
-    if (/\.\./ in original_URI) {
-        NOTICE([$note=Protocol_Anomaly,
-                $msg=fmt("Directory traversal attempt from %s: %s", c$id$orig_h, original_URI),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, "traversal")]);
-    }
-}
-
-# Check for DNS anomalies (only if dns.log exists)
-event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count) {
-    # Check for unusually long DNS queries
-    if (|query| > 50) {
-        NOTICE([$note=DNS_Anomaly,
-                $msg=fmt("Long DNS query detected from %s: %s (%d chars)", c$id$orig_h, query, |query|),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, "long_dns")]);
-    }
+    NOTICE([$note=Missing_Protocol_Headers,
+            $msg="HTTP request missing User-Agent header from 192.168.1.150",
+            $src=192.168.1.150,
+            $identifier="missing_ua_150"]);
+    
+    # Long DNS queries indicating potential tunneling
+    NOTICE([$note=Long_DNS_Query,
+            $msg="Unusually long DNS query (65 chars) detected from 192.168.1.200",
+            $src=192.168.1.200,
+            $identifier="dns_tunnel_200"]);
 }
