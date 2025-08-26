@@ -52,16 +52,25 @@ if [ $VALID_PCAPS -eq 3 ]; then
     echo "✓ All PCAP files found and valid:"
     ls -lh *.pcap
 else
-    echo "✗ Missing or invalid PCAP files. Creating traffic captures..."
-    
-    # Ensure we have netcat
-    which nc >/dev/null 2>&1 || sudo apt-get install -y netcat-openbsd >/dev/null 2>&1
-    
-    # Clean up old files
-    rm -f suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap 2>/dev/null
-    
     # Create suspicious traffic
     echo "  Creating port scan traffic..."
+    
+    # Start a simple HTTP server for real HTTP traffic
+    python3 -m http.server 8080 >/dev/null 2>&1 &
+    HTTP_SERVER_PID=$!
+    
+    # Start a DNS server simulation (optional, for dns.log)
+    sudo python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('127.0.0.1', 5353))
+while True:
+    try:
+        data, addr = s.recvfrom(1024)
+        s.sendto(b'DNS_RESPONSE', addr)
+    except: break
+" >/dev/null 2>&1 &
+    DNS_SIM_PID=$!
     
     # Start packet capture for suspicious traffic
     sudo timeout 20 tcpdump -i lo -w suspicious_traffic.pcap >/dev/null 2>&1 &
@@ -79,84 +88,38 @@ else
         (echo "SSH-2.0-Test" | timeout 0.1 nc 127.0.0.1 22 2>/dev/null || true) &
     done
     
-    # HTTP with SQL injection
+    # HTTP with SQL injection using curl (creates proper HTTP log)
     echo "  Creating HTTP attack patterns..."
-    (echo -e "GET /login.php?user=admin'+OR+'1'='1 HTTP/1.1\r\nHost: vulnerable.local\r\n\r\n" | \
-        timeout 0.2 nc 127.0.0.1 80 2>/dev/null || true) &
+    sleep 2  # Let HTTP server start
+    curl -s "http://127.0.0.1:8080/login.php?user=admin'+OR+'1'='1" >/dev/null 2>&1 &
+    curl -s "http://127.0.0.1:8080/../../../../etc/passwd" >/dev/null 2>&1 &
+    curl -s "http://127.0.0.1:8080/admin.php" -H "User-Agent: " >/dev/null 2>&1 &
+    curl -s "http://127.0.0.1:8080/test" >/dev/null 2>&1 &
     
-    # Directory traversal
-    (echo -e "GET /../../../../etc/passwd HTTP/1.1\r\nHost: target.local\r\n\r\n" | \
-        timeout 0.2 nc 127.0.0.1 80 2>/dev/null || true) &
-    
-    # DNS patterns
+    # DNS patterns using dig
     echo "  Creating DNS tunneling patterns..."
-    for i in {1..5}; do
-        (nslookup "verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$i.tunnel.evil.com" 127.0.0.1 2>/dev/null || true) &
-    done
+    which dig >/dev/null 2>&1 && {
+        for i in {1..5}; do
+            dig @127.0.0.1 -p 5353 "verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$i.tunnel.evil.com" +short >/dev/null 2>&1 &
+        done
+    }
+    
+    # Normal DNS queries too
+    which nslookup >/dev/null 2>&1 && {
+        for domain in google.com facebook.com; do
+            nslookup $domain 127.0.0.1 >/dev/null 2>&1 &
+        done
+    }
     
     # Wait for traffic generation
     sleep 5
     
-    # Stop capture
+    # Stop capture and servers
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
+    kill $HTTP_SERVER_PID 2>/dev/null
+    sudo kill $DNS_SIM_PID 2>/dev/null
     
-    # If suspicious_traffic.pcap is too small, use Python to create a proper one
-    if [ ! -f "suspicious_traffic.pcap" ] || [ $(stat -c%s "suspicious_traffic.pcap" 2>/dev/null || echo 0) -lt 1000 ]; then
-        echo "  Creating enhanced suspicious traffic with Python..."
-        python3 << 'PYTHON_EOF' 2>/dev/null || true
-import struct
-import random
-import socket
-
-def write_pcap(filename, packets_data):
-    with open(filename, 'wb') as f:
-        # PCAP global header
-        f.write(struct.pack('<IHHIIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
-        
-        # Write packets
-        for packet in packets_data:
-            # Simple Ethernet + IP + TCP structure
-            eth = b'\x00' * 12 + b'\x08\x00'  # Ethernet
-            
-            # IP header
-            ip = b'\x45\x00'  # Version, IHL
-            ip += struct.pack('>H', 40)  # Total length
-            ip += b'\x00\x00\x40\x00\x40\x06\x00\x00'  # ID, flags, TTL, proto
-            
-            # Source and dest IPs
-            src_ip = socket.inet_aton(packet['src'])
-            dst_ip = socket.inet_aton(packet['dst'])
-            ip += src_ip + dst_ip
-            
-            # TCP header
-            tcp = struct.pack('>HH', packet['sport'], packet['dport'])
-            tcp += b'\x00\x00\x00\x00' * 2  # Seq, Ack
-            tcp += b'\x50\x02\x00\x00\x00\x00\x00\x00'  # Flags, window, etc
-            
-            pkt = eth + ip + tcp
-            
-            # PCAP packet header
-            f.write(struct.pack('<IIII', 0, 0, len(pkt), len(pkt)))
-            f.write(pkt)
-
-# Generate suspicious traffic patterns
-packets = []
-
-# Port scanning from 192.168.1.100
-for port in [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 1433, 3306, 3389, 8080]:
-    packets.append({'src': '192.168.1.100', 'dst': '10.0.0.5', 
-                   'sport': random.randint(40000, 60000), 'dport': port})
-
-# SSH brute force from 203.0.113.50
-for i in range(20):
-    packets.append({'src': '203.0.113.50', 'dst': '10.0.0.10',
-                   'sport': 50000 + i, 'dport': 22})
-
-# HTTP attacks
-packets.append({'src': '192.168.1.150', 'dst': '10.0.0.80',
-               'sport': 54321, 'dport': 80})
-
 write_pcap('suspicious_traffic.pcap', packets)
 print("    Created suspicious_traffic.pcap with Python")
 PYTHON_EOF
