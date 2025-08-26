@@ -1,1 +1,0 @@
-# lab_detect-and-analyze-network-threats-with-zeek
