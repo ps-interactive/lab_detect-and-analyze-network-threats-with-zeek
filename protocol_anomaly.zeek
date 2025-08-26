@@ -1,86 +1,85 @@
-##! Detect port scanning activity
-##! This script identifies potential port scans based on connection patterns
+##! Protocol anomaly detection script for Zeek
+##! Detects protocol mismatches and missing required headers
 
-@load base/frameworks/notice
-
-module PortScan;
+module ProtocolAnomaly;
 
 export {
     redef enum Notice::Type += {
-        ## Port scan detected
-        Port_Scan,
-        ## Vertical scan detected (multiple ports, single host)
-        Vertical_Scan,
-        ## Horizontal scan detected (single port, multiple hosts)  
-        Horizontal_Scan
+        Protocol_Mismatch,
+        Missing_Protocol_Headers,
+        Suspicious_User_Agent,
+        Long_DNS_Query
     };
     
-    ## Threshold for number of ports before alerting
-    const scan_threshold = 5 &redef;
-    
-    ## Time window for scan detection (in seconds)
-    const scan_window = 60.0 &redef;
-    
-    ## Track scanning activity
-    global scanner_activity: table[addr] of set[port] &create_expire=scan_window;
-    global horizontal_scanners: table[addr] of set[addr] &create_expire=scan_window;
+    # DNS query length threshold
+    const dns_length_threshold = 50 &redef;
 }
 
-event connection_attempt(c: connection)
-{
-    local src = c$id$orig_h;
-    local dst = c$id$resp_h;
-    local dport = c$id$resp_p;
+# Check for HTTP on wrong ports
+event http_request(c: connection, method: string, original_URI: string,
+                   unescaped_URI: string, version: string) {
+    local resp_port = c$id$resp_p;
     
-    # Track vertical scanning (many ports on same host)
-    if ( src !in scanner_activity )
-        scanner_activity[src] = set();
+    # Check for plain HTTP on HTTPS port
+    if (resp_port == 443/tcp && c$conn$conn_state != "SF") {
+        NOTICE([$note=Protocol_Mismatch,
+                $msg=fmt("Plain HTTP detected on HTTPS port 443 from %s", c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, c$id$resp_h, resp_port)]);
+    }
     
-    add scanner_activity[src][dport];
+    # Check for missing Host header in HTTP/1.1
+    if (version == "1.1" && !c$http?$host) {
+        NOTICE([$note=Missing_Protocol_Headers,
+                $msg=fmt("HTTP/1.1 request missing Host header from %s", c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, "missing_host")]);
+    }
     
-    if ( |scanner_activity[src]| >= scan_threshold )
-    {
-        NOTICE([$note=Vertical_Scan,
-                $msg=fmt("%s is scanning multiple ports on %s", src, dst),
-                $src=src,
-                $identifier=cat(src)]);
+    # Check for missing or suspicious User-Agent
+    if (!c$http?$user_agent) {
+        NOTICE([$note=Missing_Protocol_Headers,
+                $msg=fmt("HTTP request missing User-Agent header from %s", c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, "missing_ua")]);
+    } else if (c$http$user_agent == "-" || 
+               c$http$user_agent == "" ||
+               /^(curl|wget|python|ruby|perl)/i in c$http$user_agent) {
+        NOTICE([$note=Suspicious_User_Agent,
+                $msg=fmt("Suspicious User-Agent detected: %s from %s", 
+                        c$http$user_agent, c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, c$http$user_agent)]);
     }
 }
 
-event connection_rejected(c: connection)
-{
-    local src = c$id$orig_h;
-    local dst = c$id$resp_h;
+# Check for suspicious DNS queries
+event dns_request(c: connection, msg: dns_msg, query: string, qtype: count, qclass: count) {
+    # Check for unusually long DNS queries (potential DNS tunneling)
+    if (|query| > dns_length_threshold) {
+        NOTICE([$note=Long_DNS_Query,
+                $msg=fmt("Unusually long DNS query (%d chars): %s from %s", 
+                        |query|, query, c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, query)]);
+    }
     
-    # Track horizontal scanning (same port on many hosts)
-    if ( src !in horizontal_scanners )
-        horizontal_scanners[src] = set();
-    
-    add horizontal_scanners[src][dst];
-    
-    if ( |horizontal_scanners[src]| >= scan_threshold )
-    {
-        NOTICE([$note=Horizontal_Scan,
-                $msg=fmt("%s is scanning multiple hosts", src),
-                $src=src,
-                $identifier=cat(src)]);
+    # Check for suspicious patterns in DNS queries
+    if (/^[0-9a-f]{32,}/ in query ||  # Long hex strings
+        /\.(tk|ml|ga|cf)$/ in query) { # Suspicious TLDs
+        NOTICE([$note=Long_DNS_Query,
+                $msg=fmt("Suspicious DNS query pattern: %s from %s", query, c$id$orig_h),
+                $conn=c,
+                $identifier=cat(c$id$orig_h, query)]);
     }
 }
 
-event connection_state_remove(c: connection)
-{
-    # Detect SYN scans (connections that never complete)
-    if ( c$conn$history == "S" || c$conn$history == "Sr" )
-    {
-        local src = c$id$orig_h;
-        
-        if ( src in scanner_activity && |scanner_activity[src]| >= 3 )
-        {
-            NOTICE([$note=Port_Scan,
-                    $msg=fmt("Potential SYN scan from %s", src),
-                    $src=src,
-                    $conn=c,
-                    $identifier=cat(src)]);
-        }
+# Detect weird protocol behaviors
+event weird(name: string, msg: string, addl: string) {
+    # Alert on specific weird behaviors that indicate attacks
+    if (name == "truncated_header" || 
+        name == "above_hole_data_without_any_acks" ||
+        name == "bad_HTTP_request") {
+        print fmt("Protocol anomaly detected: %s - %s", name, msg);
     }
 }
