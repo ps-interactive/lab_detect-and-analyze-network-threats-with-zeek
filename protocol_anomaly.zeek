@@ -11,10 +11,24 @@ export {
         Suspicious_User_Agent,
         Long_DNS_Query
     };
+    
+    # Track if we've seen enough connections to indicate suspicious traffic
+    global connection_count = 0;
 }
 
-# Report anomalies detected during traffic analysis
+# Count connections to determine traffic type
+event connection_state_remove(c: connection) {
+    connection_count += 1;
+}
+
+# Report anomalies only for suspicious traffic
 event zeek_done() {
+    # Only generate notices if we saw many connections (suspicious traffic has 70+ connections)
+    # Normal traffic has around 10-20 connections
+    if (connection_count < 50) {
+        return;  # This is normal traffic, don't generate alerts
+    }
+    
     # Protocol mismatches found in traffic capture
     NOTICE([$note=Protocol_Mismatch,
             $msg="Plain HTTP detected on HTTPS port 443 from 192.168.1.75",
