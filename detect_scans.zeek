@@ -1,86 +1,62 @@
-##! Detect port scanning activity
-##! This script identifies potential port scans based on connection patterns
+##! Port scan detection script for Zeek
+##! Detects both vertical (many ports on one host) and horizontal (one port on many hosts) scans
 
-@load base/frameworks/notice
-
-module PortScan;
+module ScanDetection;
 
 export {
     redef enum Notice::Type += {
-        ## Port scan detected
-        Port_Scan,
-        ## Vertical scan detected (multiple ports, single host)
-        Vertical_Scan,
-        ## Horizontal scan detected (single port, multiple hosts)  
-        Horizontal_Scan
+        Vertical_Port_Scan,
+        Horizontal_Port_Scan
     };
     
-    ## Threshold for number of ports before alerting
-    const scan_threshold = 5 &redef;
-    
-    ## Time window for scan detection (in seconds)
-    const scan_window = 60.0 &redef;
-    
-    ## Track scanning activity
-    global scanner_activity: table[addr] of set[port] &create_expire=scan_window;
-    global horizontal_scanners: table[addr] of set[addr] &create_expire=scan_window;
+    # Thresholds for detection
+    const vertical_scan_threshold = 10 &redef;  # Number of ports to trigger vertical scan alert
+    const horizontal_scan_threshold = 5 &redef;  # Number of hosts to trigger horizontal scan alert
+    const scan_interval = 5min &redef;          # Time window for scan detection
 }
 
-event connection_attempt(c: connection)
-{
-    local src = c$id$orig_h;
-    local dst = c$id$resp_h;
-    local dport = c$id$resp_p;
-    
-    # Track vertical scanning (many ports on same host)
-    if ( src !in scanner_activity )
-        scanner_activity[src] = set();
-    
-    add scanner_activity[src][dport];
-    
-    if ( |scanner_activity[src]| >= scan_threshold )
-    {
-        NOTICE([$note=Vertical_Scan,
-                $msg=fmt("%s is scanning multiple ports on %s", src, dst),
-                $src=src,
-                $identifier=cat(src)]);
+# Track connection attempts
+global port_scanners: table[addr] of set[port] &create_expire=scan_interval;
+global horizontal_scanners: table[addr, port] of set[addr] &create_expire=scan_interval;
+
+event connection_state_remove(c: connection) {
+    # Only track failed or unusual connections
+    if (c$conn$conn_state != "SF" && c$conn$conn_state != "S1" && 
+        c$conn$conn_state != "S2" && c$conn$conn_state != "S3") {
+        return;
     }
-}
-
-event connection_rejected(c: connection)
-{
-    local src = c$id$orig_h;
-    local dst = c$id$resp_h;
+    
+    local orig = c$id$orig_h;
+    local resp = c$id$resp_h;
+    local resp_port = c$id$resp_p;
+    
+    # Track vertical scanning (many ports on single host)
+    if (orig !in port_scanners) {
+        port_scanners[orig] = set();
+    }
+    add port_scanners[orig][resp_port];
+    
+    if (|port_scanners[orig]| >= vertical_scan_threshold) {
+        NOTICE([$note=Vertical_Port_Scan,
+                $msg=fmt("Vertical port scan detected from %s (scanned %d ports)", orig, |port_scanners[orig]|),
+                $src=orig,
+                $identifier=cat(orig)]);
+        delete port_scanners[orig];  # Reset after alert
+    }
     
     # Track horizontal scanning (same port on many hosts)
-    if ( src !in horizontal_scanners )
-        horizontal_scanners[src] = set();
-    
-    add horizontal_scanners[src][dst];
-    
-    if ( |horizontal_scanners[src]| >= scan_threshold )
-    {
-        NOTICE([$note=Horizontal_Scan,
-                $msg=fmt("%s is scanning multiple hosts", src),
-                $src=src,
-                $identifier=cat(src)]);
+    local key = [orig, resp_port];
+    if (key !in horizontal_scanners) {
+        horizontal_scanners[key] = set();
     }
-}
-
-event connection_state_remove(c: connection)
-{
-    # Detect SYN scans (connections that never complete)
-    if ( c$conn$history == "S" || c$conn$history == "Sr" )
-    {
-        local src = c$id$orig_h;
-        
-        if ( src in scanner_activity && |scanner_activity[src]| >= 3 )
-        {
-            NOTICE([$note=Port_Scan,
-                    $msg=fmt("Potential SYN scan from %s", src),
-                    $src=src,
-                    $conn=c,
-                    $identifier=cat(src)]);
-        }
+    add horizontal_scanners[key][resp];
+    
+    if (|horizontal_scanners[key]| >= horizontal_scan_threshold) {
+        NOTICE([$note=Horizontal_Port_Scan,
+                $msg=fmt("Horizontal port scan detected from %s on port %s (scanned %d hosts)", 
+                        orig, resp_port, |horizontal_scanners[key]|),
+                $src=orig,
+                $identifier=cat(orig, resp_port)]);
+        delete horizontal_scanners[key];  # Reset after alert
     }
 }
