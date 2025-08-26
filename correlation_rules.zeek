@@ -1,155 +1,186 @@
-##! Correlation rules for detecting multi-stage attacks
-##! Correlates multiple events to identify complex attack patterns
+##! Correlation rules for detecting complex multi-stage attacks
+##! This script correlates various events to identify attack patterns
 
-module CorrelationRules;
+@load base/frameworks/notice
+@load base/frameworks/intel
+
+module AttackCorrelation;
 
 export {
     redef enum Notice::Type += {
-        SSH_Brute_Force,
+        ## Brute force attack detected
+        Brute_Force_Attack,
+        ## Potential C2 communication detected
+        C2_Communication,
+        ## Multi-stage attack detected
         Multi_Stage_Attack,
-        C2_Beacon_Pattern,
+        ## Data exfiltration suspected
         Data_Exfiltration
     };
     
-    # Thresholds
-    const ssh_attempt_threshold = 5 &redef;
-    const beacon_interval_variance = 10.0 &redef;  # seconds
-    const exfil_size_threshold = 1000000 &redef;   # 1MB
+    ## Track failed authentication attempts
+    global failed_auth_attempts: table[addr] of count &create_expire=300.0 &default=0;
+    
+    ## Track successful connections after failures
+    global post_fail_success: set[addr] &create_expire=600.0;
+    
+    ## Track potential C2 beacons
+    global beacon_tracking: table[addr] of vector of time &create_expire=3600.0;
+    
+    ## Threshold for brute force detection
+    const brute_force_threshold = 10 &redef;
+    
+    ## Threshold for beacon regularity (in seconds)
+    const beacon_interval_threshold = 5.0 &redef;
 }
 
-# Track SSH attempts
-global ssh_attempts: table[addr, addr] of count &create_expire=10min &default=0;
-
-# Track connection patterns for beacon detection
-global connection_times: table[addr, addr, port] of vector of time &create_expire=30min;
-
-# Track multi-stage attack indicators
-type AttackStage: record {
-    scan_detected: bool &default=F;
-    exploit_attempt: bool &default=F;
-    backdoor_installed: bool &default=F;
-    data_exfil: bool &default=F;
-};
-
-global attack_stages: table[addr] of AttackStage &create_expire=1hr;
-
-# Detect SSH brute force
-event ssh_auth_failed(c: connection) {
-    local key = [c$id$orig_h, c$id$resp_h];
-    ++ssh_attempts[key];
-    
-    if (ssh_attempts[key] >= ssh_attempt_threshold) {
-        NOTICE([$note=SSH_Brute_Force,
-                $msg=fmt("SSH brute force detected: %s -> %s (%d attempts)", 
-                        c$id$orig_h, c$id$resp_h, ssh_attempts[key]),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, c$id$resp_h, "ssh_brute")]);
+# Track SSH brute force attempts
+event connection_state_remove(c: connection)
+{
+    if ( c$id$resp_p == 22/tcp )
+    {
+        local src = c$id$orig_h;
         
-        # Mark as potential multi-stage attack
-        if (c$id$orig_h !in attack_stages) {
-            attack_stages[c$id$orig_h] = AttackStage();
-        }
-        attack_stages[c$id$orig_h]$exploit_attempt = T;
-    }
-}
-
-# Detect C2 beacon patterns
-event connection_state_remove(c: connection) {
-    local key = [c$id$orig_h, c$id$resp_h, c$id$resp_p];
-    
-    # Track connection times for beacon detection
-    if (key !in connection_times) {
-        connection_times[key] = vector();
-    }
-    connection_times[key] += network_time();
-    
-    # Check for regular beacon intervals
-    if (|connection_times[key]| >= 5) {
-        local intervals: vector of interval = vector();
-        for (i in [1..|connection_times[key]|-1]) {
-            intervals += connection_times[key][i] - connection_times[key][i-1];
-        }
-        
-        # Calculate average interval
-        local sum_interval = 0.0;
-        for (i in intervals) {
-            sum_interval += interval_to_double(intervals[i]);
-        }
-        local avg_interval = sum_interval / |intervals|;
-        
-        # Check variance
-        local variance = 0.0;
-        for (i in intervals) {
-            local diff = interval_to_double(intervals[i]) - avg_interval;
-            variance += diff * diff;
-        }
-        variance = variance / |intervals|;
-        
-        # Low variance indicates regular beaconing
-        if (variance < beacon_interval_variance) {
-            NOTICE([$note=C2_Beacon_Pattern,
-                    $msg=fmt("Regular beacon pattern detected: %s -> %s:%s (avg interval: %.1f sec)",
-                            c$id$orig_h, c$id$resp_h, c$id$resp_p, avg_interval),
-                    $conn=c,
-                    $identifier=cat(c$id$orig_h, c$id$resp_h, c$id$resp_p, "beacon")]);
+        # Connection was rejected or reset quickly
+        if ( c$conn$history == "Sr" || c$conn$history == "ShR" )
+        {
+            failed_auth_attempts[src] += 1;
             
-            # Mark as backdoor installed
-            if (c$id$orig_h !in attack_stages) {
-                attack_stages[c$id$orig_h] = AttackStage();
+            if ( failed_auth_attempts[src] >= brute_force_threshold )
+            {
+                NOTICE([$note=Brute_Force_Attack,
+                        $msg=fmt("SSH brute force attack from %s (%d attempts)", 
+                                src, failed_auth_attempts[src]),
+                        $src=src,
+                        $conn=c,
+                        $identifier=cat(src)]);
             }
-            attack_stages[c$id$orig_h]$backdoor_installed = T;
+        }
+        # Successful connection after multiple failures
+        else if ( c$conn$history == "ShAdFr" && src in failed_auth_attempts &&
+                  failed_auth_attempts[src] > 5 )
+        {
+            add post_fail_success[src];
+            
+            NOTICE([$note=Multi_Stage_Attack,
+                    $msg=fmt("Successful SSH after %d failed attempts from %s", 
+                            failed_auth_attempts[src], src),
+                    $src=src,
+                    $conn=c,
+                    $identifier=cat(src)]);
         }
     }
+}
+
+# Detect potential C2 beacons based on regular intervals
+event connection_established(c: connection)
+{
+    local src = c$id$orig_h;
+    local dst = c$id$resp_h;
     
-    # Check for data exfiltration
-    if (c$conn?$orig_bytes && c$conn$orig_bytes > exfil_size_threshold) {
-        NOTICE([$note=Data_Exfiltration,
-                $msg=fmt("Large data transfer detected: %s -> %s (%d bytes)",
-                        c$id$orig_h, c$id$resp_h, c$conn$orig_bytes),
-                $conn=c,
-                $identifier=cat(c$id$orig_h, c$id$resp_h, "exfil")]);
+    # Track connections to external IPs on unusual ports
+    if ( ! Site::is_local_addr(dst) && 
+         c$id$resp_p != 80/tcp && c$id$resp_p != 443/tcp )
+    {
+        if ( src !in beacon_tracking )
+            beacon_tracking[src] = vector();
         
-        if (c$id$orig_h !in attack_stages) {
-            attack_stages[c$id$orig_h] = AttackStage();
+        beacon_tracking[src] += network_time();
+        
+        # Check for regular intervals
+        if ( |beacon_tracking[src]| >= 3 )
+        {
+            local intervals: vector of interval = vector();
+            
+            for ( i in beacon_tracking[src] )
+            {
+                if ( i > 0 )
+                {
+                    local diff = beacon_tracking[src][i] - beacon_tracking[src][i-1];
+                    intervals += diff;
+                }
+            }
+            
+            # Check if intervals are regular (within threshold)
+            local regular = T;
+            if ( |intervals| >= 2 )
+            {
+                local first_interval = intervals[0];
+                for ( j in intervals )
+                {
+                    if ( j > 0 )
+                    {
+                        local interval_diff = intervals[j] > first_interval ? 
+                                             intervals[j] - first_interval : 
+                                             first_interval - intervals[j];
+                        
+                        if ( interval_diff > beacon_interval_threshold )
+                            regular = F;
+                    }
+                }
+                
+                if ( regular )
+                {
+                    NOTICE([$note=C2_Communication,
+                            $msg=fmt("Regular beacon pattern detected from %s to %s:%s", 
+                                    src, dst, c$id$resp_p),
+                            $src=src,
+                            $conn=c,
+                            $identifier=cat(src, dst)]);
+                }
+            }
         }
-        attack_stages[c$id$orig_h]$data_exfil = T;
     }
 }
 
-# Correlate events for multi-stage attack detection
-event Scan_Detection::Vertical_Port_Scan(n: Notice::Info) {
-    if (n$src !in attack_stages) {
-        attack_stages[n$src] = AttackStage();
-    }
-    attack_stages[n$src]$scan_detected = T;
-    check_multi_stage(n$src);
-}
-
-function check_multi_stage(attacker: addr) {
-    if (attacker !in attack_stages) {
-        return;
-    }
-    
-    local stages = attack_stages[attacker];
-    local stage_count = 0;
-    
-    if (stages$scan_detected) ++stage_count;
-    if (stages$exploit_attempt) ++stage_count;
-    if (stages$backdoor_installed) ++stage_count;
-    if (stages$data_exfil) ++stage_count;
-    
-    if (stage_count >= 2) {
-        NOTICE([$note=Multi_Stage_Attack,
-                $msg=fmt("Multi-stage attack detected from %s (%d stages identified)", 
-                        attacker, stage_count),
-                $src=attacker,
-                $identifier=cat(attacker, "multi_stage")]);
+# Detect potential data exfiltration
+event connection_state_remove(c: connection)
+{
+    # Large outbound data transfer to external host
+    if ( c$conn?$orig_bytes && c$conn?$resp_bytes )
+    {
+        local src = c$id$orig_h;
+        local dst = c$id$resp_h;
+        
+        if ( Site::is_local_addr(src) && ! Site::is_local_addr(dst) )
+        {
+            # Suspicious if large upload (> 10MB) with small download
+            if ( c$conn$orig_bytes > 10485760 && 
+                 c$conn$resp_bytes < c$conn$orig_bytes / 10 )
+            {
+                NOTICE([$note=Data_Exfiltration,
+                        $msg=fmt("Large data upload from %s to %s (%d bytes)", 
+                                src, dst, c$conn$orig_bytes),
+                        $src=src,
+                        $conn=c,
+                        $identifier=cat(c$uid)]);
+            }
+        }
     }
 }
 
-# Periodic check for multi-stage attacks
-event zeek_done() {
-    for (attacker in attack_stages) {
-        check_multi_stage(attacker);
+# Correlate scan + exploit + C2
+event Notice::notice(n: Notice::Info)
+{
+    # If we see a scan, then successful connection, then C2 behavior
+    # from the same source, it's likely a multi-stage attack
+    
+    if ( n$note == PortScan::Port_Scan && n?$src )
+    {
+        # Mark this host as a scanner for correlation
+        # In production, you'd track this more sophisticatedly
+        
+        when ( local result = lookup_addr(n$src) )
+        {
+            # Additional correlation logic would go here
+        }
+    }
+    
+    # Check if a scanner later establishes C2
+    if ( n$note == C2_Communication && n?$src )
+    {
+        # If this host was previously seen scanning
+        # This would require more sophisticated state tracking
+        # For the lab, we'll demonstrate the concept
     }
 }
