@@ -259,33 +259,6 @@ if [ -d /home/ubuntu/lab ]; then
     done
 fi
 
-# Create a simple test script if none exist
-if [ ! -f /home/ubuntu/zeek_scripts/detect_scans.zeek ]; then
-    echo "Creating sample detection script..."
-    cat << 'EOF' > /home/ubuntu/zeek_scripts/detect_scans.zeek
-# Simple port scan detector
-@load base/frameworks/notice
-
-module PortScan;
-
-export {
-    redef enum Notice::Type += {
-        Port_Scan
-    };
-}
-
-event connection_attempt(c: connection) {
-    # Simple detection - just for testing
-    if (c$id$resp_p == 22/tcp || c$id$resp_p == 23/tcp) {
-        NOTICE([$note=Port_Scan,
-                $msg=fmt("Possible scan to port %s", c$id$resp_p),
-                $conn=c]);
-    }
-}
-EOF
-    echo "✓ Created sample detect_scans.zeek"
-fi
-
 echo
 echo "===================================="
 echo "Lab initialization complete!"
