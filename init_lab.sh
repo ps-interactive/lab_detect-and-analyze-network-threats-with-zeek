@@ -60,7 +60,6 @@ else
 import sys
 try:
     from scapy.all import *
-    conf.L3socket = L3RawSocket
 except ImportError:
     print("Installing required packages...")
     import subprocess
@@ -124,7 +123,7 @@ def create_suspicious_traffic():
         beacon = IP(src="192.168.1.105", dst=c2_server)/TCP(sport=55555, dport=8443, flags="PA", seq=i*1000, ack=i*2000)/Raw(load=beacon_data)
         packets.append(beacon)
     
-    wrpcap("suspicious_traffic.pcap", packets, linktype=1)
+    wrpcap("suspicious_traffic.pcap", packets)
     print(f"  Created suspicious_traffic.pcap ({len(packets)} packets)")
 
 def create_normal_traffic():
@@ -161,7 +160,7 @@ def create_normal_traffic():
         ack = IP(src=src, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="A", seq=1001, ack=2001)
         packets.append(ack)
     
-    wrpcap("normal_traffic.pcap", packets, linktype=1)
+    wrpcap("normal_traffic.pcap", packets)
     print(f"  Created normal_traffic.pcap ({len(packets)} packets)")
 
 def create_malware_traffic():
@@ -191,7 +190,7 @@ def create_malware_traffic():
             resp = IP(src=c2, dst=infected)/TCP(sport=4444, dport=sport, flags="PA", seq=2001+i*50, ack=1001+i*100+len(beacon))/Raw(load=cmd)
             packets.append(resp)
     
-    wrpcap("sample_malware_conn.pcap", packets, linktype=1)
+    wrpcap("sample_malware_conn.pcap", packets)
     print(f"  Created sample_malware_conn.pcap ({len(packets)} packets)")
 
 # Create all PCAP files
