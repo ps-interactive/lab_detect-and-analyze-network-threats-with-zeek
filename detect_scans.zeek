@@ -10,9 +10,9 @@ export {
     };
     
     # Thresholds for detection
-    const vertical_scan_threshold = 10 &redef;  # Number of ports to trigger vertical scan alert
-    const horizontal_scan_threshold = 5 &redef;  # Number of hosts to trigger horizontal scan alert
-    const scan_interval = 5min &redef;          # Time window for scan detection
+    const vertical_scan_threshold = 10 &redef;
+    const horizontal_scan_threshold = 5 &redef;
+    const scan_interval = 5min &redef;
 }
 
 # Track connection attempts
@@ -41,7 +41,7 @@ event connection_state_remove(c: connection) {
                 $msg=fmt("Vertical port scan detected from %s (scanned %d ports)", orig, |port_scanners[orig]|),
                 $src=orig,
                 $identifier=cat(orig)]);
-        delete port_scanners[orig];  # Reset after alert
+        delete port_scanners[orig];
     }
     
     # Track horizontal scanning (same port on many hosts)
@@ -57,6 +57,6 @@ event connection_state_remove(c: connection) {
                         orig, resp_port, |horizontal_scanners[key]|),
                 $src=orig,
                 $identifier=cat(orig, resp_port)]);
-        delete horizontal_scanners[key];  # Reset after alert
+        delete horizontal_scanners[key];
     }
 }
