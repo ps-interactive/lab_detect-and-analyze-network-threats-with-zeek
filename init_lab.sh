@@ -119,10 +119,9 @@ else
     wait $TCPDUMP_PID 2>/dev/null
     
     # Extract protocol logs from captured traffic analysis
-    echo "  Extracting HTTP protocol logs from traffic analysis..."
+    echo "  Extracting protocol logs from traffic analysis..."
     
-    # Restore HTTP protocol log data from traffic analysis
-    cat > http.log << 'HTTPDATA'
+    cat > http.log << 'ENDHTTP'
 #separator \x09
 #set_separator	,
 #empty_field	(empty)
@@ -136,12 +135,15 @@ else
 1756228882.456789	C9tr0n3I6OZ3lyTAU9	192.168.1.80	30000	10.0.0.80	80	1	GET	example.com	/admin.php	-	1.1	-	0	0	-	-	-	-	(empty)	-	-	-	-	-	-	-	-	-
 1756228882.567890	CbWb883BM987hFGL12	192.168.1.100	40000	10.0.0.80	80	1	GET	normal.site	/index.html	-	1.1	Mozilla/5.0 (Windows NT 10.0)	0	0	200	OK	-	-	(empty)	-	-	-	-	-	-	-	-	-
 #close	2025-08-26-17-32-57
-HTTPDATA
-
-    echo "  Extracting DNS protocol logs from traffic analysis..."
+ENDHTTP
     
-    # Restore DNS query log data from traffic analysis
-    cat > dns.log << 'DNSDATA'
+    if [ -f "http.log" ]; then
+        echo "    ✓ Created http.log"
+    else
+        echo "    ✗ Failed to create http.log"
+    fi
+    
+    cat > dns.log << 'ENDDNS'
 #separator \x09
 #set_separator	,
 #empty_field	(empty)
@@ -155,8 +157,14 @@ HTTPDATA
 1756228882.444444	C8VWqF1H8TvM2NkLi	192.168.1.71	50000	192.168.1.1	53	udp	1237	0.001	google.com	1	C_INTERNET	1	A	0	NOERROR	F	F	T	T	0	93.184.216.34	3600.0	F
 1756228882.555555	CqNx9n4VdGpTyKX8j	192.168.1.71	50001	192.168.1.1	53	udp	1238	0.001	facebook.com	1	C_INTERNET	1	A	0	NOERROR	F	F	T	T	0	157.240.3.35	3600.0	F
 #close	2025-08-26-17-32-57
-DNSDATA
-
+ENDDNS
+    
+    if [ -f "dns.log" ]; then
+        echo "    ✓ Created dns.log"
+    else
+        echo "    ✗ Failed to create dns.log"
+    fi
+    
     echo "  Protocol log extraction complete"
     
     # Ensure minimum valid PCAP files
