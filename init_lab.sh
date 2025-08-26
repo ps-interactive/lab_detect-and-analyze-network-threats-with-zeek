@@ -67,62 +67,92 @@ except ImportError:
     from scapy.all import *
 
 import random
+import time
 
 def create_suspicious_traffic():
     packets = []
     
-    # Port scanning activity
+    # Port scanning activity - ensure proper packet structure
     print("  Creating port scan traffic...")
     src = "192.168.1.100"
+    target = "10.0.0.5"
+    
     for port in [21, 22, 23, 25, 80, 443, 445, 1433, 3306, 3389, 8080]:
-        syn = IP(src=src, dst="192.168.1.10")/TCP(sport=random.randint(40000,60000), dport=port, flags="S", seq=1000)
-        packets.append(syn)
+        sport = random.randint(40000, 60000)
+        # Create proper Ethernet/IP/TCP packets
+        pkt = Ether()/IP(src=src, dst=target)/TCP(sport=sport, dport=port, flags="S")
+        packets.append(pkt)
+        # Add response for some ports
         if port in [22, 80, 443]:
-            syn_ack = IP(src="192.168.1.10", dst=src)/TCP(sport=port, dport=syn[TCP].sport, flags="SA", seq=2000, ack=1001)
-            packets.append(syn_ack)
-            rst = IP(src=src, dst="192.168.1.10")/TCP(sport=syn[TCP].sport, dport=port, flags="R", seq=1001)
+            resp = Ether()/IP(src=target, dst=src)/TCP(sport=port, dport=sport, flags="SA")
+            packets.append(resp)
+            rst = Ether()/IP(src=src, dst=target)/TCP(sport=sport, dport=port, flags="R")
+            packets.append(rst)
+        else:
+            # Port closed
+            rst = Ether()/IP(src=target, dst=src)/TCP(sport=port, dport=sport, flags="RA")
             packets.append(rst)
     
     # SSH brute force attempts
-    print("  Creating SSH authentication failures...")
+    print("  Creating SSH brute force attempts...")
     attacker = "203.0.113.50"
+    ssh_target = "10.0.0.10"
+    
     for i in range(20):
         sport = random.randint(50000, 60000)
-        syn = IP(src=attacker, dst="192.168.1.15")/TCP(sport=sport, dport=22, flags="S", seq=i*1000)
+        # Full TCP handshake
+        syn = Ether()/IP(src=attacker, dst=ssh_target)/TCP(sport=sport, dport=22, flags="S")
         packets.append(syn)
-        syn_ack = IP(src="192.168.1.15", dst=attacker)/TCP(sport=22, dport=sport, flags="SA", seq=i*2000, ack=i*1000+1)
+        syn_ack = Ether()/IP(src=ssh_target, dst=attacker)/TCP(sport=22, dport=sport, flags="SA")
         packets.append(syn_ack)
-        ack = IP(src=attacker, dst="192.168.1.15")/TCP(sport=sport, dport=22, flags="A", seq=i*1000+1, ack=i*2000+1)
+        ack = Ether()/IP(src=attacker, dst=ssh_target)/TCP(sport=sport, dport=22, flags="A")
         packets.append(ack)
-        rst = IP(src="192.168.1.15", dst=attacker)/TCP(sport=22, dport=sport, flags="R", seq=i*2000+1)
-        packets.append(rst)
+        # Quick termination (failed auth)
+        fin = Ether()/IP(src=ssh_target, dst=attacker)/TCP(sport=22, dport=sport, flags="FA")
+        packets.append(fin)
+        ack2 = Ether()/IP(src=attacker, dst=ssh_target)/TCP(sport=sport, dport=22, flags="A")
+        packets.append(ack2)
     
-    # HTTP traffic with SQL injection
+    # HTTP with SQL injection
     print("  Creating HTTP attack patterns...")
-    payload = "GET /login.php?user=admin' OR '1'='1&pass=x HTTP/1.1\r\nHost: vulnerable.local\r\n\r\n"
-    http_attack = IP(src="192.168.1.110", dst="192.168.1.30")/TCP(sport=54321, dport=80, flags="PA", seq=10000, ack=20000)/Raw(load=payload)
-    packets.append(http_attack)
+    http_attacker = "192.168.1.150"
+    web_server = "10.0.0.80"
+    sport = 54321
+    
+    # TCP handshake for HTTP
+    syn = Ether()/IP(src=http_attacker, dst=web_server)/TCP(sport=sport, dport=80, flags="S")
+    packets.append(syn)
+    syn_ack = Ether()/IP(src=web_server, dst=http_attacker)/TCP(sport=80, dport=sport, flags="SA")
+    packets.append(syn_ack)
+    ack = Ether()/IP(src=http_attacker, dst=web_server)/TCP(sport=sport, dport=80, flags="A")
+    packets.append(ack)
+    
+    # HTTP request with SQL injection
+    payload = b"GET /login.php?user=admin' OR '1'='1&pass=x HTTP/1.1\r\nHost: vulnerable.local\r\n\r\n"
+    http_req = Ether()/IP(src=http_attacker, dst=web_server)/TCP(sport=sport, dport=80, flags="PA")/Raw(load=payload)
+    packets.append(http_req)
     
     # Directory traversal
-    traversal = "GET /../../../../etc/passwd HTTP/1.1\r\nHost: target.local\r\n\r\n"
-    dir_attack = IP(src="192.168.1.111", dst="192.168.1.30")/TCP(sport=54322, dport=80, flags="PA", seq=30000, ack=40000)/Raw(load=traversal)
-    packets.append(dir_attack)
+    sport2 = 54322
+    syn = Ether()/IP(src="192.168.1.111", dst=web_server)/TCP(sport=sport2, dport=80, flags="S")
+    packets.append(syn)
+    syn_ack = Ether()/IP(src=web_server, dst="192.168.1.111")/TCP(sport=80, dport=sport2, flags="SA")
+    packets.append(syn_ack)
+    ack = Ether()/IP(src="192.168.1.111", dst=web_server)/TCP(sport=sport2, dport=80, flags="A")
+    packets.append(ack)
     
-    # DNS tunneling patterns
+    traversal = b"GET /../../../../etc/passwd HTTP/1.1\r\nHost: target.local\r\n\r\n"
+    dir_req = Ether()/IP(src="192.168.1.111", dst=web_server)/TCP(sport=sport2, dport=80, flags="PA")/Raw(load=traversal)
+    packets.append(dir_req)
+    
+    # DNS tunneling
     print("  Creating DNS tunneling traffic...")
     for i in range(5):
         long_query = "data" + "x" * 40 + str(i) + ".tunnel.evil.com"
-        dns = IP(src="192.168.1.102", dst="8.8.8.8")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=long_query))
-        packets.append(dns)
+        dns_pkt = Ether()/IP(src="192.168.1.102", dst="8.8.8.8")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=long_query))
+        packets.append(dns_pkt)
     
-    # C2 beacon traffic
-    print("  Creating command and control beacons...")
-    c2_server = "185.159.158.1"
-    for i in range(10):
-        beacon_data = f"BEACON:{i:04d}:ACTIVE:SYSINFO:HOST"
-        beacon = IP(src="192.168.1.105", dst=c2_server)/TCP(sport=55555, dport=8443, flags="PA", seq=i*1000, ack=i*2000)/Raw(load=beacon_data)
-        packets.append(beacon)
-    
+    # Write PCAP
     wrpcap("suspicious_traffic.pcap", packets)
     print(f"  Created suspicious_traffic.pcap ({len(packets)} packets)")
 
@@ -133,32 +163,34 @@ def create_normal_traffic():
     print("  Creating normal HTTP traffic...")
     for i in range(10):
         src = f"192.168.1.{50+i}"
-        request = f"GET /index.html HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
-        http = IP(src=src, dst="192.168.1.80")/TCP(sport=random.randint(50000,60000), dport=80, flags="PA", seq=i*1000, ack=i*2000)/Raw(load=request)
-        packets.append(http)
-        response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>Welcome</body></html>"
-        resp = IP(src="192.168.1.80", dst=src)/TCP(sport=80, dport=http[TCP].sport, flags="PA", seq=i*2000, ack=i*1000+len(request))/Raw(load=response)
-        packets.append(resp)
-    
-    # Normal DNS queries
-    print("  Creating normal DNS queries...")
-    for domain in ["google.com", "github.com", "stackoverflow.com", "microsoft.com"]:
-        dns_q = IP(src="192.168.1.71", dst="192.168.1.1")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=domain))
-        packets.append(dns_q)
-        dns_r = IP(src="192.168.1.1", dst="192.168.1.71")/UDP(sport=53, dport=dns_q[UDP].sport)/DNS(qr=1, qd=DNSQR(qname=domain), an=DNSRR(rrname=domain, rdata="93.184.216.34"))
-        packets.append(dns_r)
-    
-    # HTTPS connections
-    print("  Creating HTTPS connections...")
-    for i in range(5):
-        src = f"192.168.1.{61+i}"
+        dst = "93.184.216.34"
         sport = random.randint(50000, 60000)
-        syn = IP(src=src, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="S", seq=1000)
+        
+        # Full connection
+        syn = Ether()/IP(src=src, dst=dst)/TCP(sport=sport, dport=80, flags="S")
         packets.append(syn)
-        syn_ack = IP(src="192.168.1.443", dst=src)/TCP(sport=443, dport=sport, flags="SA", seq=2000, ack=1001)
+        syn_ack = Ether()/IP(src=dst, dst=src)/TCP(sport=80, dport=sport, flags="SA")
         packets.append(syn_ack)
-        ack = IP(src=src, dst="192.168.1.443")/TCP(sport=sport, dport=443, flags="A", seq=1001, ack=2001)
+        ack = Ether()/IP(src=src, dst=dst)/TCP(sport=sport, dport=80, flags="A")
         packets.append(ack)
+        
+        # HTTP request
+        request = b"GET /index.html HTTP/1.1\r\nHost: www.example.com\r\nUser-Agent: Mozilla/5.0\r\n\r\n"
+        http_req = Ether()/IP(src=src, dst=dst)/TCP(sport=sport, dport=80, flags="PA")/Raw(load=request)
+        packets.append(http_req)
+        
+        # Connection termination
+        fin = Ether()/IP(src=src, dst=dst)/TCP(sport=sport, dport=80, flags="FA")
+        packets.append(fin)
+        fin_ack = Ether()/IP(src=dst, dst=src)/TCP(sport=80, dport=sport, flags="FA")
+        packets.append(fin_ack)
+    
+    # Normal DNS
+    print("  Creating normal DNS queries...")
+    for domain in ["google.com", "github.com", "stackoverflow.com"]:
+        src = "192.168.1.71"
+        dns_q = Ether()/IP(src=src, dst="8.8.8.8")/UDP(sport=random.randint(50000,60000), dport=53)/DNS(qd=DNSQR(qname=domain))
+        packets.append(dns_q)
     
     wrpcap("normal_traffic.pcap", packets)
     print(f"  Created normal_traffic.pcap ({len(packets)} packets)")
@@ -166,29 +198,30 @@ def create_normal_traffic():
 def create_malware_traffic():
     packets = []
     
-    # Malware C2 beacons
+    # C2 beacon traffic
     print("  Creating malware beacon traffic...")
-    c2 = "45.142.120.5"
-    infected = "192.168.1.150"
-    sport = 55555
+    c2 = "185.220.101.45"
+    infected = "192.168.1.55"
+    sport = 45678
     
-    # Initial handshake
-    syn = IP(src=infected, dst=c2)/TCP(sport=sport, dport=4444, flags="S", seq=1000)
-    packets.append(syn)
-    syn_ack = IP(src=c2, dst=infected)/TCP(sport=4444, dport=sport, flags="SA", seq=2000, ack=1001)
-    packets.append(syn_ack)
-    ack = IP(src=infected, dst=c2)/TCP(sport=sport, dport=4444, flags="A", seq=1001, ack=2001)
-    packets.append(ack)
-    
-    # Regular beacons
+    # Regular beacons at intervals
     for i in range(10):
-        beacon = f"BEACON:{i:04d}:HOST:WINBOX:USER:admin:STATUS:ACTIVE"
-        pkt = IP(src=infected, dst=c2)/TCP(sport=sport, dport=4444, flags="PA", seq=1001+i*100, ack=2001+i*50)/Raw(load=beacon)
-        packets.append(pkt)
-        if i % 3 == 0:
-            cmd = "CMD:SCREENSHOT" if i == 3 else "CMD:PERSIST"
-            resp = IP(src=c2, dst=infected)/TCP(sport=4444, dport=sport, flags="PA", seq=2001+i*50, ack=1001+i*100+len(beacon))/Raw(load=cmd)
-            packets.append(resp)
+        # Connection for each beacon
+        syn = Ether()/IP(src=infected, dst=c2)/TCP(sport=sport+i, dport=4444, flags="S")
+        packets.append(syn)
+        syn_ack = Ether()/IP(src=c2, dst=infected)/TCP(sport=4444, dport=sport+i, flags="SA")
+        packets.append(syn_ack)
+        ack = Ether()/IP(src=infected, dst=c2)/TCP(sport=sport+i, dport=4444, flags="A")
+        packets.append(ack)
+        
+        # Beacon data
+        beacon = b"BEACON:" + str(i).encode() + b":HEARTBEAT:OK"
+        data_pkt = Ether()/IP(src=infected, dst=c2)/TCP(sport=sport+i, dport=4444, flags="PA")/Raw(load=beacon)
+        packets.append(data_pkt)
+        
+        # Close connection
+        fin = Ether()/IP(src=infected, dst=c2)/TCP(sport=sport+i, dport=4444, flags="FA")
+        packets.append(fin)
     
     wrpcap("sample_malware_conn.pcap", packets)
     print(f"  Created sample_malware_conn.pcap ({len(packets)} packets)")
