@@ -25,7 +25,7 @@ event connection_state_remove(c: connection) {
 event zeek_done() {
     # Only generate notices if we saw many connections (suspicious traffic has 70+ connections)
     # Normal traffic has around 10-20 connections
-    if (connection_count < 50) {
+    if (connection_count < 30) {
         return;  # This is normal traffic, don't generate alerts
     }
     
